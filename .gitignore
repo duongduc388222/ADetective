@@ -1,0 +1,76 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Data (large files)
+data/*.h5ad
+data/*.h5
+data/*.csv
+data/*.tsv
+*.hdf5
+results/
+outputs/
+
+# Model checkpoints
+checkpoints/
+*.pt
+*.pth
+*.pkl
+*.pickle
+
+# Logs
+*.log
+logs/
+exp.log
+
+# Temporary
+*.tmp
+.cache/
+.pytest_cache/
+
+# Colab specific
+content/
+sample_data/
+
+# Config with sensitive data
+config/access_tokens.py
+
+# OS
+.DS_Store
+Thumbs.db

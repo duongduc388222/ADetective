@@ -1,0 +1,16 @@
+# Base requirements (same as requirements.txt)
+-r requirements.txt
+
+# scGPT specific
+scgpt>=0.2.0
+flash-attn==2.6.3  # Required for efficient attention in scGPT
+
+# Additional dependencies for foundation models
+einops==0.7.0
+xformers==0.0.22
+
+# For tokenization
+tokenizers==0.14.0
+
+# Optional: For better performance
+ninja==1.11.1
