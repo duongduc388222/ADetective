@@ -62,9 +62,10 @@ class SEAADDataLoader:
             AnnData object with raw data
         """
         logger.info(f"Loading SEAAD dataset from {self.data_path}")
-        logger.warning("⚠️ This is a 35GB file - loading may take several minutes")
+        logger.warning("⚠️ Loading dataset into memory...")
 
-        self.adata = ad.read_h5ad(self.data_path, backed="r")
+        # Load into memory (not backed mode) to allow filtering and manipulation
+        self.adata = ad.read_h5ad(self.data_path)
         logger.info(f"Loaded data shape: {self.adata.shape}")
         logger.info(f"Observations (cells): {self.adata.n_obs}")
         logger.info(f"Variables (genes): {self.adata.n_vars}")
