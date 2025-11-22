@@ -71,6 +71,11 @@ sample_data/
 # Config with sensitive data
 config/access_tokens.py
 
+# Development & Planning
+plan/
+claude/
+.claude/
+
 # OS
 .DS_Store
 Thumbs.db
