@@ -32,6 +32,7 @@ tensorboard==2.14.0
 tqdm==4.66.1
 pyyaml==6.0.1
 python-dotenv==1.0.0
+click==8.1.7
 
 # Development
 pytest==7.4.0
