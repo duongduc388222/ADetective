@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 def prepare_data(
     config: Config,
-    cell_type_col: str = "Class",
+    cell_type_col: str = "Subclass",
     cell_type_filter: str = "Oligodendrocyte",
     donor_col: str = "Donor ID",
     adnc_col: str = "ADNC",
@@ -199,8 +199,8 @@ def prepare_data(
 @click.command()
 @click.option(
     "--cell-type-col",
-    default="Class",
-    help="Column name for cell type (default: Class)",
+    default="Subclass",
+    help="Column name for cell type (default: Subclass for fine-grained cell types)",
 )
 @click.option(
     "--cell-type-filter",

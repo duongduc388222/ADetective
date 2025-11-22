@@ -23,17 +23,29 @@ The data pipeline is implemented in three files:
 
 ### Column Names (Confirmed from Dataset)
 
-These are the actual column names in the SEAAD dataset:
+Analysis focuses on these primary columns:
 
-- **Cell type column**: `Class` (contains cell type information)
-  - Also available: `Subclass` for more detailed cell type classification
+- **Cell type column**: `Subclass` (PRIMARY - fine-grained cell type classification)
+  - Target value: `"Oligodendrocyte"`
+  - Also available: `Class` (coarse-grained), `Supertype` (oligodendrocyte subtypes)
 - **Donor ID column**: `Donor ID` (unique donor identifier)
 - **ADNC status column**: `ADNC` (Alzheimer's Disease Neuropathologic Change status)
 
-**Example values**:
-- ADNC: "High", "Not AD", "Low", "Intermediate"
-- Class: Cell type names (includes "Oligodendrocyte")
-- Donor ID: Unique donor identifiers
+**Key Categorical Values**:
+- **ADNC**: "High" (label=1), "Not AD" (label=0), "Intermediate" (excluded), "Low" (excluded)
+- **Subclass**: "Oligodendrocyte" (target), plus 23 other cell types
+- **Supertype**: Oligodendrocyte subtypes: Oligo_1, Oligo_2, Oligo_3, Oligo_4
+- **Donor ID**: Unique identifiers for each donor
+- **Sex**: "Female", "Male"
+- **APOE Genotype**: "2/2", "2/3", "2/4", "3/3", "3/4", "4/4"
+- **Braak**: "Braak 0" through "Braak VI" (tau pathology stages)
+- **CERAD**: "Absent", "Sparse", "Moderate", "Frequent" (amyloid pathology)
+
+**Optional Metadata** (for enrichment):
+- Age at Death, PMI, Years of education
+- Pathology markers: percent AT8, GFAP, NeuN, aSyn, pTDP43, 6e10 positive area
+- Cognitive Status: "Dementia", "No dementia"
+- LATE, Highest Lewy Body Disease
 
 If you need to verify or adjust column names:
 ```bash
@@ -87,24 +99,30 @@ Output:
 
 ### Full Data Preparation
 
-Using default column names (recommended):
+Using default column names (recommended - uses Subclass for Oligodendrocyte):
 ```bash
 python scripts/prepare_data.py
 ```
 
-With custom parameters (if column names differ):
+If you want to use Class (coarse-grained cell types) instead:
+```bash
+python scripts/prepare_data.py --cell-type-col Class
+```
+
+With custom parameters (example):
 ```bash
 python scripts/prepare_data.py \
-  --cell-type-col Class \
+  --cell-type-col Subclass \
   --cell-type-filter Oligodendrocyte \
   --donor-col "Donor ID" \
   --adnc-col ADNC \
   --n-hvgs 2000
 ```
 
-To use Subclass instead of Class:
+To analyze Oligodendrocyte subtypes (Supertype level):
 ```bash
-python scripts/prepare_data.py --cell-type-col Subclass
+python scripts/prepare_data.py --cell-type-col Supertype --cell-type-filter Oligo_1
+# Then repeat for Oligo_2, Oligo_3, Oligo_4
 ```
 
 ### Expected Runtime
@@ -146,11 +164,11 @@ results/processed_data/
 
 ### SEAADDataLoader
 
-**Initialize with correct column names**:
+**Initialize with correct column names (default configuration)**:
 ```python
 loader = SEAADDataLoader(
     data_path,
-    cell_type_column="Class",      # Column with cell types
+    cell_type_column="Subclass",   # PRIMARY: Fine-grained cell types
     donor_column="Donor ID",        # Column with donor IDs
     adnc_column="ADNC",            # Column with ADNC status
 )

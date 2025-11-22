@@ -17,10 +17,10 @@ class SEAADDataLoader:
         self,
         data_path: str,
         cache_processed: bool = True,
-        cell_type_column: str = "Class",
+        cell_type_column: str = "Subclass",
         donor_column: str = "Donor ID",
         adnc_column: str = "ADNC",
-        cell_subtype_column: Optional[str] = "Subclass",
+        cell_supertype_column: Optional[str] = "Supertype",
     ):
         """
         Initialize SEAAD data loader.
@@ -28,10 +28,10 @@ class SEAADDataLoader:
         Args:
             data_path: Path to SEAAD_A9_RNAseq_DREAM.2025-07-15.h5ad file
             cache_processed: Whether to cache processed data
-            cell_type_column: Column name for cell type (default: "Class")
+            cell_type_column: Column name for cell type (default: "Subclass" - fine-grained)
             donor_column: Column name for donor ID (default: "Donor ID")
             adnc_column: Column name for ADNC status (default: "ADNC")
-            cell_subtype_column: Column name for cell subtype (default: "Subclass")
+            cell_supertype_column: Column name for cell supertype (default: "Supertype")
         """
         self.data_path = Path(data_path)
         self.cache_processed = cache_processed
@@ -42,13 +42,14 @@ class SEAADDataLoader:
         self.cell_type_column = cell_type_column
         self.donor_column = donor_column
         self.adnc_column = adnc_column
-        self.cell_subtype_column = cell_subtype_column
+        self.cell_supertype_column = cell_supertype_column
 
-        logger.info(f"Configured columns:")
-        logger.info(f"  Cell type: {self.cell_type_column}")
+        logger.info(f"Configured columns for SEAAD analysis:")
+        logger.info(f"  Cell type (primary): {self.cell_type_column}")
+        logger.info(f"  Cell supertype (optional): {self.cell_supertype_column}")
         logger.info(f"  Donor ID: {self.donor_column}")
         logger.info(f"  ADNC status: {self.adnc_column}")
-        logger.info(f"  Cell subtype: {self.cell_subtype_column}")
+        logger.info(f"  Focus: Oligodendrocyte cells with High vs Not AD classification")
 
         if not self.data_path.exists():
             raise FileNotFoundError(f"Data file not found: {data_path}")

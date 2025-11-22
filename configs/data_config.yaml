@@ -1,5 +1,6 @@
 # SEAAD Dataset Column Configuration
-# This file documents the actual column names in the SEAAD dataset
+# Analysis Focus: Oligodendrocyte (Subclass) cells with High vs Not AD (ADNC) classification
+# This file documents the actual column names and categorical values in the SEAAD dataset
 # to avoid assumptions and ensure consistency across the codebase
 
 dataset:
@@ -7,10 +8,11 @@ dataset:
   version: "2025-07-15"
   size_gb: 35
   format: "H5AD (AnnData)"
+  analysis_focus: "Oligodendrocyte AD Pathology Classification (Binary: High vs Not AD)"
 
-# Observation (cell-level) columns
+# Observation (cell-level) columns with categorical values
 observations:
-  # Metadata columns in the dataset
+  # All metadata columns in the dataset
   all_columns:
     - "ADNC"
     - "APOE Genotype"
@@ -25,9 +27,9 @@ observations:
     - "LATE"
     - "Method"
     - "PMI"
-    - "Race (choice=American Indian"
+    - "Race (choice=American Indian/ Alaska Native)"
     - "Race (choice=Asian)"
-    - "Race (choice=Black"
+    - "Race (choice=Black/ African American)"
     - "Race (choice=Native Hawaiian or Pacific Islander)"
     - "Race (choice=Other)"
     - "Race (choice=Unknown or unreported)"
@@ -46,13 +48,107 @@ observations:
     - "percent aSyn positive area"
     - "percent pTDP43 positive area"
 
-  # Key columns for this project
-  cell_type_column: "Class"  # IMPORTANT: Cell type info (verify which contains Oligodendrocyte)
-  cell_subtype_column: "Subclass"  # More detailed cell type classification
+  # Key columns for this analysis
+  cell_type_column: "Subclass"  # Primary: Fine-grained cell type (contains "Oligodendrocyte")
+  cell_supertype_column: "Supertype"  # Fine granularity within Oligodendrocyte (Oligo_1, Oligo_2, etc.)
+  cell_class_column: "Class"  # Coarse: Broad cell type (Neuronal/Non-neuronal)
   donor_id_column: "Donor ID"  # Unique identifier for each donor
   adnc_column: "ADNC"  # Alzheimer's Disease Neuropathologic Change status
 
-  # Additional metadata useful for analysis
+  # Categorical value mapping
+  categorical_values:
+    ADNC:
+      - "High"           # High AD neuropathology (TARGET: label=1)
+      - "Not AD"         # No AD neuropathology (TARGET: label=0)
+      - "Intermediate"   # EXCLUDE from analysis
+      - "Low"            # EXCLUDE from analysis
+
+    Subclass:  # Primary cell type for filtering
+      oligodendrocytes: "Oligodendrocyte"  # TARGET cell type
+      other_cells:
+        - "Pvalb"
+        - "Vip"
+        - "OPC"
+        - "Lamp5 Lhx6"
+        - "Sst"
+        - "L6 CT"
+        - "L6 IT"
+        - "Astrocyte"
+        - "L5 IT"
+        - "L2/3 IT"
+        - "Microglia-PVM"
+        - "L4 IT"
+        - "Lamp5"
+        - "L5/6 NP"
+        - "Pax6"
+        - "L6 IT Car3"
+        - "Sncg"
+        - "Chandelier"
+        - "L6b"
+        - "L5 ET"
+        - "Endothelial"
+        - "Sst Chodl"
+        - "VLMC"
+
+    Supertype:  # Oligodendrocyte subtypes (optional for fine-grained analysis)
+      oligodendrocytes:
+        - "Oligo_1"
+        - "Oligo_2"
+        - "Oligo_3"
+        - "Oligo_4"
+
+    Sex:
+      - "Female"
+      - "Male"
+
+    Method:
+      - "3' 10x v3.1"
+      - "3' 10x Multiome"
+
+    APOE_Genotype:
+      - "2/2"
+      - "2/3"
+      - "2/4"
+      - "3/3"
+      - "3/4"
+      - "4/4"
+
+    Hispanic_Latino:
+      - "No"
+      - "Yes"
+      - "Unknown"
+
+    Braak:  # Tau pathology staging
+      - "Braak 0"
+      - "Braak II"
+      - "Braak III"
+      - "Braak IV"
+      - "Braak V"
+      - "Braak VI"
+
+    CERAD:  # Amyloid pathology
+      - "Absent"
+      - "Sparse"
+      - "Moderate"
+      - "Frequent"
+
+    Cognitive_Status:
+      - "Dementia"
+      - "No dementia"
+
+  # Continuous variables (for potential enrichment)
+  continuous_columns:
+    - "Age at Death"
+    - "PMI"  # Post-mortem interval
+    - "Years of education"
+    - "percent 6e10 positive area"
+    - "percent AT8 positive area"
+    - "percent GFAP positive area"
+    - "percent NeuN positive area"
+    - "percent aSyn positive area"
+    - "percent pTDP43 positive area"
+
+  # Additional useful metadata
   useful_columns:
     - "APOE Genotype"  # Genetic risk factor
     - "Age at Death"
@@ -61,6 +157,7 @@ observations:
     - "CERAD"  # Amyloid pathology stage
     - "PMI"  # Post-mortem interval
     - "Method"  # Sequencing method
+    - "Cognitive Status"
 
 # Variable (gene-level) columns
 variables:
@@ -73,21 +170,21 @@ variables:
 
 # Processing parameters
 preprocessing:
-  # Cell type filtering
+  # Cell type filtering - PRIMARY: Use Subclass instead of Class
   cell_type_filter:
-    column: "Class"  # Which column to filter on
-    value: "Oligodendrocyte"  # What value to filter for
-    note: "IMPORTANT: Verify 'Class' contains Oligodendrocyte. If not, check 'Subclass' column"
+    column: "Subclass"  # PRIMARY: Fine-grained cell type
+    value: "Oligodendrocyte"  # Filter for oligodendrocytes
+    note: "Use Subclass for precise cell type filtering (not Class)"
 
-  # Label creation
+  # Label creation - Binary: High vs Not AD
   labeling:
     column: "ADNC"
-    positive_class: "High"  # High AD pathology
-    negative_class: "Not AD"  # No AD pathology
+    positive_class: "High"  # High AD neuropathology → label=1
+    negative_class: "Not AD"  # No AD neuropathology → label=0
     exclude_classes:
       - "Low"
       - "Intermediate"
-    note: "Binary classification: High (1) vs Not AD (0)"
+    note: "Binary classification: High (1) vs Not AD (0). Exclude Low and Intermediate."
 
   # Data splitting
   splitting:
@@ -103,13 +200,15 @@ preprocessing:
     n_hvgs: 2000
     note: "Selected per-split to avoid information leakage"
 
-# Quality control flags
+# Quality control and verification
 quality_control:
-  cell_type_verified: false  # IMPORTANT: Verify "Class" column contains cell type info
+  cell_type_verified: true  # Confirmed: "Subclass" contains "Oligodendrocyte"
   column_names_verified: true  # Column names confirmed from actual data
-  expected_adnc_values:
-    - "High"
-    - "Not AD"
-    - "Low"
-    - "Intermediate"
-  expected_cell_types: []  # TODO: Fill in after verifying Class column values
+  categorical_values_verified: true  # Values confirmed from actual dataset
+
+  verified_configurations:
+    cell_type_column: "Subclass"  # Not Class
+    cell_type_value: "Oligodendrocyte"
+    adnc_positive: "High"
+    adnc_negative: "Not AD"
+    adnc_excluded: ["Low", "Intermediate"]
