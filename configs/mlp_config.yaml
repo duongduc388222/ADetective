@@ -1,0 +1,101 @@
+# MLP Baseline Configuration
+# Simple fully-connected neural network for oligodendrocyte AD classification
+
+model:
+  name: "mlp_baseline"
+  type: "MLPClassifier"
+  description: "Baseline fully-connected network for binary classification"
+
+  architecture:
+    input_dim: 2000  # Number of highly variable genes
+    hidden_dims: [512, 256, 128]  # Hidden layer sizes (decreasing)
+    output_dim: 2  # Binary classification (0=Not AD, 1=High)
+    dropout_rate: 0.3  # Dropout after each hidden layer
+    batch_norm: true  # Use batch normalization
+    activation: "relu"  # Activation function
+
+training:
+  epochs: 100  # Maximum number of epochs
+  batch_size: 32
+  learning_rate: 1.0e-3
+  weight_decay: 1.0e-4  # L2 regularization
+
+  optimizer: "adamw"  # Adam with weight decay
+
+  # Learning rate schedule
+  warmup:
+    enabled: true
+    steps: 500  # Warmup steps
+
+  # Early stopping
+  early_stopping:
+    enabled: true
+    patience: 15  # Stop if no improvement for 15 epochs
+    metric: "val_loss"  # Metric to monitor
+    mode: "min"  # Minimize validation loss
+
+  # Gradient management
+  gradient_clipping: 1.0  # Clip gradients to prevent exploding gradients
+  gradient_accumulation_steps: 1  # Accumulate gradients over N batches
+
+  # Mixed precision training
+  mixed_precision: "bf16"  # Use bfloat16 (better stability than fp16)
+
+data:
+  # Data split ratios (should match preprocessing)
+  train_ratio: 0.70
+  val_ratio: 0.10
+  test_ratio: 0.20
+
+  # Data loading
+  num_workers: 4  # Number of data loading workers
+  pin_memory: true  # Pin memory for faster data transfer
+
+  # Data augmentation (optional for gene expression)
+  augmentation:
+    enabled: false
+    noise_std: 0.01  # Gaussian noise standard deviation
+
+evaluation:
+  # Metrics to compute
+  metrics:
+    - "accuracy"
+    - "precision"
+    - "recall"
+    - "f1"
+    - "roc_auc"
+
+  # Save evaluation results
+  save_plots: true
+  plot_format: "png"
+
+  # Metrics thresholds
+  thresholds:
+    accuracy_target: 0.85
+    f1_target: 0.80
+    roc_auc_target: 0.85
+
+checkpointing:
+  # Model checkpointing
+  save_best_model: true
+  save_dir: "checkpoints/mlp"  # Relative to output directory
+  save_frequency: 5  # Save every N epochs
+  keep_n_best: 3  # Keep 3 best models
+  resume_from_checkpoint: null  # Path to checkpoint to resume from
+
+logging:
+  # Logging configuration
+  log_frequency: 100  # Log every N batches
+  use_wandb: false  # Use Weights & Biases
+  wandb_project: "adetective"
+  wandb_entity: null  # Your wandb entity (username/team)
+
+reproducibility:
+  # Random seeds
+  seed: 42
+  deterministic: true  # Use deterministic algorithms (may be slower)
+
+device:
+  # Device configuration
+  device: "auto"  # "auto", "cuda", "cpu"
+  num_gpus: null  # Number of GPUs (null = use all)
