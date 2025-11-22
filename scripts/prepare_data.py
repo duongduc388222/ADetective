@@ -3,15 +3,14 @@
 Phase 2: Data Preparation and Preprocessing.
 
 This script handles the complete data preprocessing pipeline:
-1. Load raw SEAAD data
+1. Load pre-filtered oligodendrocyte subset
 2. Explore and validate metadata
-3. Filter for oligodendrocytes
-4. Create binary labels (High vs Not AD)
-5. Create donor-level stratified train/val/test splits
-6. Select highly variable genes
-7. Save processed datasets
+3. Create binary labels (High vs Not AD)
+4. Create donor-level stratified train/val/test splits
+5. Select highly variable genes
+6. Save processed datasets
 
-⚠️ WARNING: Processing the 35GB dataset may take 30+ minutes
+Uses pre-filtered dataset: Oligodendrocytes_Subset.h5ad (1.9GB, ~1.3M cells)
 """
 
 import logging
@@ -85,8 +84,8 @@ def prepare_data(
         return False
 
     # Load raw data
-    logger.info(f"\n[2/6] Loading raw SEAAD data")
-    logger.warning("⚠️  35GB file - this will take several minutes...")
+    logger.info(f"\n[2/6] Loading pre-filtered oligodendrocyte data")
+    logger.warning("⚠️  Loading Oligodendrocytes_Subset.h5ad (1.9GB)...")
     try:
         adata = loader.load_raw_data()
     except Exception as e:
