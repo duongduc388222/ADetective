@@ -13,18 +13,42 @@ logger = logging.getLogger(__name__)
 class SEAADDataLoader:
     """Load and preprocess SEAAD dataset for oligodendrocyte AD classification."""
 
-    def __init__(self, data_path: str, cache_processed: bool = True):
+    def __init__(
+        self,
+        data_path: str,
+        cache_processed: bool = True,
+        cell_type_column: str = "Class",
+        donor_column: str = "Donor ID",
+        adnc_column: str = "ADNC",
+        cell_subtype_column: Optional[str] = "Subclass",
+    ):
         """
         Initialize SEAAD data loader.
 
         Args:
             data_path: Path to SEAAD_A9_RNAseq_DREAM.2025-07-15.h5ad file
             cache_processed: Whether to cache processed data
+            cell_type_column: Column name for cell type (default: "Class")
+            donor_column: Column name for donor ID (default: "Donor ID")
+            adnc_column: Column name for ADNC status (default: "ADNC")
+            cell_subtype_column: Column name for cell subtype (default: "Subclass")
         """
         self.data_path = Path(data_path)
         self.cache_processed = cache_processed
         self.adata = None
         self.metadata = None
+
+        # Column name configuration
+        self.cell_type_column = cell_type_column
+        self.donor_column = donor_column
+        self.adnc_column = adnc_column
+        self.cell_subtype_column = cell_subtype_column
+
+        logger.info(f"Configured columns:")
+        logger.info(f"  Cell type: {self.cell_type_column}")
+        logger.info(f"  Donor ID: {self.donor_column}")
+        logger.info(f"  ADNC status: {self.adnc_column}")
+        logger.info(f"  Cell subtype: {self.cell_subtype_column}")
 
         if not self.data_path.exists():
             raise FileNotFoundError(f"Data file not found: {data_path}")
@@ -88,15 +112,12 @@ class SEAADDataLoader:
         else:
             raise ValueError(f"Column '{column}' not found in observations")
 
-    def filter_cell_type(
-        self, cell_type: str = "Oligodendrocyte", column: str = "cell_type"
-    ) -> ad.AnnData:
+    def filter_cell_type(self, cell_type: str = "Oligodendrocyte") -> ad.AnnData:
         """
-        Filter data for specific cell type.
+        Filter data for specific cell type using configured column.
 
         Args:
-            cell_type: Cell type to filter for
-            column: Column name containing cell type information
+            cell_type: Cell type to filter for (default: "Oligodendrocyte")
 
         Returns:
             Filtered AnnData object
@@ -104,12 +125,19 @@ class SEAADDataLoader:
         if self.adata is None:
             self.load_raw_data()
 
-        logger.info(f"Filtering for {cell_type} cells using column '{column}'")
+        logger.info(f"Filtering for {cell_type} cells using column '{self.cell_type_column}'")
         before_count = self.adata.n_obs
+
+        # Verify column exists
+        if self.cell_type_column not in self.adata.obs:
+            raise ValueError(
+                f"Column '{self.cell_type_column}' not found in observations.\n"
+                f"Available columns: {list(self.adata.obs.columns)}"
+            )
 
         # Create a copy to avoid modifying backed dataset
         adata_filtered = self.adata[
-            self.adata.obs[column].str.lower() == cell_type.lower()
+            self.adata.obs[self.cell_type_column].str.lower() == cell_type.lower()
         ].copy()
 
         logger.info(f"Cells before filtering: {before_count}")
@@ -119,15 +147,14 @@ class SEAADDataLoader:
         return self.adata
 
     def create_labels(
-        self, adnc_column: str = "ADNC", exclude_categories: list = None
+        self, exclude_categories: Optional[list] = None
     ) -> Tuple[ad.AnnData, Dict[str, int]]:
         """
         Create binary labels: High AD (1) vs Not AD (0).
 
-        Excludes 'Low' and 'Intermediate' categories.
+        Excludes 'Low' and 'Intermediate' categories by default.
 
         Args:
-            adnc_column: Column name containing ADNC status
             exclude_categories: Categories to exclude (default: ['Low', 'Intermediate'])
 
         Returns:
@@ -139,23 +166,30 @@ class SEAADDataLoader:
         if self.adata is None:
             self.load_raw_data()
 
-        logger.info(f"Creating labels from column '{adnc_column}'")
+        logger.info(f"Creating labels from column '{self.adnc_column}'")
         logger.info(f"Excluding categories: {exclude_categories}")
 
+        # Verify column exists
+        if self.adnc_column not in self.adata.obs:
+            raise ValueError(
+                f"Column '{self.adnc_column}' not found in observations.\n"
+                f"Available columns: {list(self.adata.obs.columns)}"
+            )
+
         # Get ADNC values
-        adnc_values = self.adata.obs[adnc_column].copy()
+        adnc_values = self.adata.obs[self.adnc_column].copy()
         logger.info(f"ADNC value distribution before filtering:")
-        logger.info(self.adata.obs[adnc_column].value_counts())
+        logger.info(self.adata.obs[self.adnc_column].value_counts())
 
         # Filter out excluded categories
-        mask = ~self.adata.obs[adnc_column].isin(exclude_categories)
+        mask = ~self.adata.obs[self.adnc_column].isin(exclude_categories)
         adata_filtered = self.adata[mask].copy()
 
         logger.info(f"Cells retained: {adata_filtered.n_obs} / {self.adata.n_obs}")
 
         # Create binary labels
         label_mapping = {"Not AD": 0, "High": 1}
-        labels = (adata_filtered.obs[adnc_column] == "High").astype(int)
+        labels = (adata_filtered.obs[self.adnc_column] == "High").astype(int)
 
         adata_filtered.obs["label"] = labels
         adata_filtered.obs["label_name"] = labels.map({0: "Not AD", 1: "High"})
@@ -166,12 +200,9 @@ class SEAADDataLoader:
         self.adata = adata_filtered
         return self.adata, label_mapping
 
-    def get_donor_info(self, donor_column: str = "donor_id") -> Dict[str, int]:
+    def get_donor_info(self) -> Dict[str, int]:
         """
-        Get donor distribution per class.
-
-        Args:
-            donor_column: Column name containing donor IDs
+        Get donor distribution per class using configured donor column.
 
         Returns:
             Dictionary with donor counts
@@ -179,10 +210,16 @@ class SEAADDataLoader:
         if self.adata is None:
             self.load_raw_data()
 
+        if self.donor_column not in self.adata.obs:
+            raise ValueError(
+                f"Column '{self.donor_column}' not found in observations.\n"
+                f"Available columns: {list(self.adata.obs.columns)}"
+            )
+
         donor_class_info = {}
         for label in [0, 1]:
             label_subset = self.adata[self.adata.obs["label"] == label]
-            donors = label_subset.obs[donor_column].nunique()
+            donors = label_subset.obs[self.donor_column].nunique()
             donor_class_info[f"label_{label}"] = donors
             logger.info(f"Label {label}: {donors} unique donors")
 
@@ -193,19 +230,17 @@ class SEAADDataLoader:
         train_ratio: float = 0.7,
         val_ratio: float = 0.1,
         test_ratio: float = 0.2,
-        donor_column: str = "donor_id",
         random_state: int = 42,
     ) -> Tuple[ad.AnnData, ad.AnnData, ad.AnnData]:
         """
         Create donor-level stratified train/val/test split.
 
-        Ensures no donor appears in multiple splits.
+        Ensures no donor appears in multiple splits using configured donor column.
 
         Args:
             train_ratio: Training set ratio
             val_ratio: Validation set ratio
             test_ratio: Test set ratio
-            donor_column: Column name with donor IDs
             random_state: Random seed
 
         Returns:
@@ -217,15 +252,22 @@ class SEAADDataLoader:
         if "label" not in self.adata.obs:
             raise ValueError("Labels not created yet. Call create_labels() first.")
 
+        if self.donor_column not in self.adata.obs:
+            raise ValueError(
+                f"Column '{self.donor_column}' not found in observations.\n"
+                f"Available columns: {list(self.adata.obs.columns)}"
+            )
+
         logger.info("Creating donor-level stratified split")
         logger.info(f"Split ratios: train={train_ratio}, val={val_ratio}, test={test_ratio}")
+        logger.info(f"Using donor column: {self.donor_column}")
 
         # Get unique donors per class
-        unique_donors = self.adata.obs[[donor_column, "label"]].drop_duplicates()
+        unique_donors = self.adata.obs[[self.donor_column, "label"]].drop_duplicates()
 
         # First split: train+val vs test
         donors_train_val, donors_test, _, _ = train_test_split(
-            unique_donors[donor_column],
+            unique_donors[self.donor_column],
             unique_donors["label"],
             test_size=test_ratio,
             random_state=random_state,
@@ -236,18 +278,18 @@ class SEAADDataLoader:
         val_size = val_ratio / (train_ratio + val_ratio)
         donors_train, donors_val, _, _ = train_test_split(
             donors_train_val,
-            unique_donors[unique_donors[donor_column].isin(donors_train_val)]["label"],
+            unique_donors[unique_donors[self.donor_column].isin(donors_train_val)]["label"],
             test_size=val_size,
             random_state=random_state,
-            stratify=unique_donors[unique_donors[donor_column].isin(donors_train_val)]["label"],
+            stratify=unique_donors[unique_donors[self.donor_column].isin(donors_train_val)]["label"],
         )
 
         # Create splits
         train_adata = self.adata[
-            self.adata.obs[donor_column].isin(donors_train)
+            self.adata.obs[self.donor_column].isin(donors_train)
         ].copy()
-        val_adata = self.adata[self.adata.obs[donor_column].isin(donors_val)].copy()
-        test_adata = self.adata[self.adata.obs[donor_column].isin(donors_test)].copy()
+        val_adata = self.adata[self.adata.obs[self.donor_column].isin(donors_val)].copy()
+        test_adata = self.adata[self.adata.obs[self.donor_column].isin(donors_test)].copy()
 
         logger.info(f"Train set: {train_adata.n_obs} cells from {donors_train.nunique()} donors")
         logger.info(f"Val set:   {val_adata.n_obs} cells from {donors_val.nunique()} donors")

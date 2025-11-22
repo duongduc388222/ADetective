@@ -35,9 +35,9 @@ logger = logging.getLogger(__name__)
 
 def prepare_data(
     config: Config,
-    cell_type_col: str = "cell_type",
+    cell_type_col: str = "Class",
     cell_type_filter: str = "Oligodendrocyte",
-    donor_col: str = "donor_id",
+    donor_col: str = "Donor ID",
     adnc_col: str = "ADNC",
     n_hvgs: int = 2000,
     train_ratio: float = 0.7,
@@ -66,10 +66,20 @@ def prepare_data(
     output_dir = Path(config.get("output.results_dir")) / "processed_data"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Initialize loader
+    # Initialize loader with configured column names
     logger.info(f"\n[1/6] Initializing data loader")
+    logger.info(f"Column configuration:")
+    logger.info(f"  Cell type: {cell_type_col}")
+    logger.info(f"  Donor ID: {donor_col}")
+    logger.info(f"  ADNC status: {adnc_col}")
+
     try:
-        loader = SEAADDataLoader(data_path)
+        loader = SEAADDataLoader(
+            data_path,
+            cell_type_column=cell_type_col,
+            donor_column=donor_col,
+            adnc_column=adnc_col,
+        )
     except FileNotFoundError as e:
         logger.error(f"Error: {e}")
         return False
@@ -94,24 +104,24 @@ def prepare_data(
     # Filter for oligodendrocytes
     logger.info(f"\n[4/6] Filtering for {cell_type_filter} cells")
     try:
-        adata = loader.filter_cell_type(cell_type_filter, cell_type_col)
+        adata = loader.filter_cell_type(cell_type_filter)
     except Exception as e:
         logger.error(f"Failed to filter cell type: {e}")
-        logger.info(f"Available columns: {list(adata.obs.columns)}")
+        logger.info(f"Error details: {e}")
         return False
 
     # Create labels
     logger.info(f"\n[5/6] Creating binary labels")
     try:
-        adata, label_mapping = loader.create_labels(adnc_col)
+        adata, label_mapping = loader.create_labels()
     except Exception as e:
         logger.error(f"Failed to create labels: {e}")
-        logger.info(f"Available columns: {list(adata.obs.columns)}")
+        logger.info(f"Error details: {e}")
         return False
 
     # Get donor info
     try:
-        donor_info = loader.get_donor_info(donor_col)
+        donor_info = loader.get_donor_info()
         logger.info(f"Donor distribution: {donor_info}")
     except Exception as e:
         logger.warning(f"Could not retrieve donor info: {e}")
@@ -123,7 +133,6 @@ def prepare_data(
             train_ratio=train_ratio,
             val_ratio=val_ratio,
             test_ratio=test_ratio,
-            donor_column=donor_col,
         )
     except Exception as e:
         logger.error(f"Failed to create splits: {e}")
@@ -190,29 +199,29 @@ def prepare_data(
 @click.command()
 @click.option(
     "--cell-type-col",
-    default="cell_type",
-    help="Column name for cell type",
+    default="Class",
+    help="Column name for cell type (default: Class)",
 )
 @click.option(
     "--cell-type-filter",
     default="Oligodendrocyte",
-    help="Cell type to filter for",
+    help="Cell type to filter for (default: Oligodendrocyte)",
 )
 @click.option(
     "--donor-col",
-    default="donor_id",
-    help="Column name for donor ID",
+    default="Donor ID",
+    help="Column name for donor ID (default: Donor ID)",
 )
 @click.option(
     "--adnc-col",
     default="ADNC",
-    help="Column name for ADNC status",
+    help="Column name for ADNC status (default: ADNC)",
 )
 @click.option(
     "--n-hvgs",
     type=int,
     default=2000,
-    help="Number of highly variable genes",
+    help="Number of highly variable genes (default: 2000)",
 )
 def main(cell_type_col, cell_type_filter, donor_col, adnc_col, n_hvgs):
     """Run data preparation pipeline."""

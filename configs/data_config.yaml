@@ -1,0 +1,115 @@
+# SEAAD Dataset Column Configuration
+# This file documents the actual column names in the SEAAD dataset
+# to avoid assumptions and ensure consistency across the codebase
+
+dataset:
+  name: "SEAAD_A9_RNAseq_DREAM"
+  version: "2025-07-15"
+  size_gb: 35
+  format: "H5AD (AnnData)"
+
+# Observation (cell-level) columns
+observations:
+  # Metadata columns in the dataset
+  all_columns:
+    - "ADNC"
+    - "APOE Genotype"
+    - "Age at Death"
+    - "Braak"
+    - "CERAD"
+    - "Class"
+    - "Cognitive Status"
+    - "Donor ID"
+    - "Highest Lewy Body Disease"
+    - "Hispanic"
+    - "LATE"
+    - "Method"
+    - "PMI"
+    - "Race (choice=American Indian"
+    - "Race (choice=Asian)"
+    - "Race (choice=Black"
+    - "Race (choice=Native Hawaiian or Pacific Islander)"
+    - "Race (choice=Other)"
+    - "Race (choice=Unknown or unreported)"
+    - "Race (choice=White)"
+    - "Sex"
+    - "Subclass"
+    - "Supertype"
+    - "Thal"
+    - "Years of education"
+    - "exp_component_name"
+    - "library_prep"
+    - "percent 6e10 positive area"
+    - "percent AT8 positive area"
+    - "percent GFAP positive area"
+    - "percent NeuN positive area"
+    - "percent aSyn positive area"
+    - "percent pTDP43 positive area"
+
+  # Key columns for this project
+  cell_type_column: "Class"  # IMPORTANT: Cell type info (verify which contains Oligodendrocyte)
+  cell_subtype_column: "Subclass"  # More detailed cell type classification
+  donor_id_column: "Donor ID"  # Unique identifier for each donor
+  adnc_column: "ADNC"  # Alzheimer's Disease Neuropathologic Change status
+
+  # Additional metadata useful for analysis
+  useful_columns:
+    - "APOE Genotype"  # Genetic risk factor
+    - "Age at Death"
+    - "Sex"
+    - "Braak"  # Tau pathology stage
+    - "CERAD"  # Amyloid pathology stage
+    - "PMI"  # Post-mortem interval
+    - "Method"  # Sequencing method
+
+# Variable (gene-level) columns
+variables:
+  all_columns:
+    - "_index"
+    - "gene_ids"
+
+  gene_id_column: "gene_ids"  # Column containing gene identifiers
+  index_column: "_index"  # Index column
+
+# Processing parameters
+preprocessing:
+  # Cell type filtering
+  cell_type_filter:
+    column: "Class"  # Which column to filter on
+    value: "Oligodendrocyte"  # What value to filter for
+    note: "IMPORTANT: Verify 'Class' contains Oligodendrocyte. If not, check 'Subclass' column"
+
+  # Label creation
+  labeling:
+    column: "ADNC"
+    positive_class: "High"  # High AD pathology
+    negative_class: "Not AD"  # No AD pathology
+    exclude_classes:
+      - "Low"
+      - "Intermediate"
+    note: "Binary classification: High (1) vs Not AD (0)"
+
+  # Data splitting
+  splitting:
+    strategy: "donor_level_stratified"
+    note: "Prevents data leakage by keeping all cells from same donor in one split"
+    train_ratio: 0.70
+    val_ratio: 0.10
+    test_ratio: 0.20
+
+  # Feature selection
+  feature_selection:
+    method: "highly_variable_genes"
+    n_hvgs: 2000
+    note: "Selected per-split to avoid information leakage"
+
+# Quality control flags
+quality_control:
+  cell_type_verified: false  # IMPORTANT: Verify "Class" column contains cell type info
+  column_names_verified: true  # Column names confirmed from actual data
+  expected_adnc_values:
+    - "High"
+    - "Not AD"
+    - "Low"
+    - "Intermediate"
+  expected_cell_types: []  # TODO: Fill in after verifying Class column values

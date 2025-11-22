@@ -21,15 +21,21 @@ The data pipeline is implemented in three files:
   - `test_data.h5ad`
   - `metadata.json`
 
-### Column Names (to be verified)
+### Column Names (Confirmed from Dataset)
 
-These are default column names. Verify these match your dataset:
+These are the actual column names in the SEAAD dataset:
 
-- **Cell type column**: `cell_type`
-- **Donor ID column**: `donor_id`
-- **ADNC status column**: `ADNC`
+- **Cell type column**: `Class` (contains cell type information)
+  - Also available: `Subclass` for more detailed cell type classification
+- **Donor ID column**: `Donor ID` (unique donor identifier)
+- **ADNC status column**: `ADNC` (Alzheimer's Disease Neuropathologic Change status)
 
-To find actual column names, run:
+**Example values**:
+- ADNC: "High", "Not AD", "Low", "Intermediate"
+- Class: Cell type names (includes "Oligodendrocyte")
+- Donor ID: Unique donor identifiers
+
+If you need to verify or adjust column names:
 ```bash
 python scripts/explore_data.py
 ```
@@ -81,18 +87,24 @@ Output:
 
 ### Full Data Preparation
 
+Using default column names (recommended):
 ```bash
 python scripts/prepare_data.py
 ```
 
-With custom parameters:
+With custom parameters (if column names differ):
 ```bash
 python scripts/prepare_data.py \
-  --cell-type-col cell_type \
+  --cell-type-col Class \
   --cell-type-filter Oligodendrocyte \
-  --donor-col donor_id \
+  --donor-col "Donor ID" \
   --adnc-col ADNC \
   --n-hvgs 2000
+```
+
+To use Subclass instead of Class:
+```bash
+python scripts/prepare_data.py --cell-type-col Subclass
 ```
 
 ### Expected Runtime
@@ -134,8 +146,14 @@ results/processed_data/
 
 ### SEAADDataLoader
 
+**Initialize with correct column names**:
 ```python
-loader = SEAADDataLoader(data_path)
+loader = SEAADDataLoader(
+    data_path,
+    cell_type_column="Class",      # Column with cell types
+    donor_column="Donor ID",        # Column with donor IDs
+    adnc_column="ADNC",            # Column with ADNC status
+)
 
 # Load raw data
 adata = loader.load_raw_data()
@@ -145,9 +163,9 @@ metadata = loader.explore_metadata()
 info = loader.get_column_info("column_name")
 
 # Filter & process
-adata = loader.filter_cell_type("Oligodendrocyte", "cell_type")
-adata, mapping = loader.create_labels("ADNC")
-train, val, test = loader.stratified_split(donor_column="donor_id")
+adata = loader.filter_cell_type("Oligodendrocyte")  # Uses configured column
+adata, mapping = loader.create_labels()             # Uses configured column
+train, val, test = loader.stratified_split()        # Uses configured column
 
 # Feature processing
 adata = loader.select_hvgs(adata, n_hvgs=2000)
