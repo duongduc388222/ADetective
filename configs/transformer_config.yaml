@@ -1,0 +1,38 @@
+# Transformer Model Configuration
+model:
+  d_model: 128                      # Model embedding dimension
+  nhead: 8                          # Number of attention heads
+  num_layers: 3                     # Number of transformer encoder layers
+  dim_feedforward: 256              # Dimension of feedforward network
+  dropout: 0.1                      # Dropout rate
+  use_cls_token: true               # Use CLS token for classification
+  expression_scaling: multiplicative # How to scale expression values ('multiplicative', 'additive', 'concatenate')
+  max_seq_length: 2048              # Maximum sequence length
+
+# Training Configuration
+training:
+  learning_rate: 0.0001             # Lower than MLP for stability
+  weight_decay: 0.0001
+  optimizer: adamw
+  epochs: 30
+  gradient_clipping: 1.0
+  early_stopping:
+    enabled: true
+    patience: 10
+  warmup:
+    enabled: false
+    steps: 500
+
+# Data Configuration
+data:
+  batch_size: 32                    # Smaller than MLP due to memory requirements
+  num_workers: 0
+
+# Logging Configuration
+logging:
+  log_frequency: 50                 # Log every N batches
+
+# Experiment Configuration
+experiment:
+  seed: 42
+  mixed_precision: bf16             # Use bfloat16 if available
