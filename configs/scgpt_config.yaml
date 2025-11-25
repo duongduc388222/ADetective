@@ -1,0 +1,37 @@
+# scGPT Foundation Model Configuration
+model:
+  n_bins: 51                    # Number of expression bins for tokenization
+  d_model: 512                  # Model dimension (matches pretrained scGPT)
+  nhead: 8                      # Number of attention heads
+  num_layers: 12                # Number of transformer layers
+  dropout: 0.1                  # Dropout rate
+  use_fast_tokenizer: true      # Use optimized tokenizer
+  freeze_layers: 6              # Freeze bottom 6 layers for efficient fine-tuning
+
+# Fine-tuning Configuration
+training:
+  learning_rate: 0.00005        # Lower learning rate for fine-tuning
+  weight_decay: 0.01            # Higher weight decay for regularization
+  gradient_accumulation_steps: 4  # Accumulate gradients for larger effective batch
+  max_grad_norm: 1.0            # Gradient clipping
+  early_stopping:
+    enabled: true
+    patience: 3                 # Early stopping patience (fewer epochs for fine-tuning)
+  warmup:
+    enabled: true
+    steps: 500                  # Warmup steps
+
+# Data Configuration
+data:
+  batch_size: 16                # Smaller batch size due to model size
+  num_workers: 0
+
+# Logging Configuration
+logging:
+  log_frequency: 50             # Log every N batches
+
+# Experiment Configuration
+experiment:
+  seed: 42
+  num_epochs: 15                # Fewer epochs for fine-tuning
+  mixed_precision: bf16         # Use bfloat16 if available
