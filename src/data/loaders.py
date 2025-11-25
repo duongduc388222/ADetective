@@ -56,19 +56,25 @@ class SEAADDataLoader:
 
     def load_raw_data(self) -> ad.AnnData:
         """
-        Load raw SEAAD dataset.
+        Load raw SEAAD dataset using memory-efficient backed mode.
+
+        Uses backed="r" (read-only memory-mapped access) to avoid loading
+        the entire 18GB file into RAM. Filtering operations will only load
+        the subset of interest into memory.
 
         Returns:
-            AnnData object with raw data
+            AnnData object with backed (memory-mapped) access
         """
         logger.info(f"Loading SEAAD dataset from {self.data_path}")
-        logger.warning("⚠️ Loading dataset into memory...")
+        logger.info("💾 Using backed='r' mode for memory-efficient loading (memory-mapped access)")
+        logger.info("   Data will only be loaded into memory when filtered or accessed")
 
-        # Load into memory (not backed mode) to allow filtering and manipulation
-        self.adata = ad.read_h5ad(self.data_path)
-        logger.info(f"Loaded data shape: {self.adata.shape}")
+        # Load with backed='r' for memory-efficient access (read-only, memory-mapped)
+        self.adata = ad.read_h5ad(self.data_path, backed="r")
+        logger.info(f"Loaded data shape (backed): {self.adata.shape}")
         logger.info(f"Observations (cells): {self.adata.n_obs}")
         logger.info(f"Variables (genes): {self.adata.n_vars}")
+        logger.info("✓ Metadata loaded successfully. Expression matrix remains on disk.")
 
         return self.adata
 
@@ -118,11 +124,13 @@ class SEAADDataLoader:
         """
         Filter data for specific cell type using configured column.
 
+        Loads only the filtered subset into memory (not the full dataset).
+
         Args:
             cell_type: Cell type to filter for (default: "Oligodendrocyte")
 
         Returns:
-            Filtered AnnData object
+            Filtered AnnData object (loaded into memory)
         """
         if self.adata is None:
             self.load_raw_data()
@@ -137,13 +145,15 @@ class SEAADDataLoader:
                 f"Available columns: {list(self.adata.obs.columns)}"
             )
 
-        # Create a copy to avoid modifying backed dataset
+        # Create a copy to load filtered subset into memory (more efficient than full load)
+        logger.info("🔍 Filtering... (loading filtered subset into memory)")
         adata_filtered = self.adata[
             self.adata.obs[self.cell_type_column].str.lower() == cell_type.lower()
         ].copy()
 
-        logger.info(f"Cells before filtering: {before_count}")
-        logger.info(f"Cells after filtering: {adata_filtered.n_obs}")
+        logger.info(f"Cells before filtering: {before_count:,}")
+        logger.info(f"Cells after filtering:  {adata_filtered.n_obs:,}")
+        logger.info(f"✓ Filtered subset loaded ({adata_filtered.n_obs} cells)")
 
         self.adata = adata_filtered
         return self.adata
@@ -178,16 +188,17 @@ class SEAADDataLoader:
                 f"Available columns: {list(self.adata.obs.columns)}"
             )
 
-        # Get ADNC values
-        adnc_values = self.adata.obs[self.adnc_column].copy()
+        # Show ADNC value distribution before filtering
         logger.info(f"ADNC value distribution before filtering:")
         logger.info(self.adata.obs[self.adnc_column].value_counts())
 
-        # Filter out excluded categories
+        # Filter out excluded categories (loads filtered subset into memory)
+        logger.info("🔍 Filtering by ADNC status... (loading filtered subset into memory)")
         mask = ~self.adata.obs[self.adnc_column].isin(exclude_categories)
         adata_filtered = self.adata[mask].copy()
 
-        logger.info(f"Cells retained: {adata_filtered.n_obs} / {self.adata.n_obs}")
+        logger.info(f"Cells retained: {adata_filtered.n_obs:,} / {self.adata.n_obs:,}")
+        logger.info(f"✓ Filtered subset loaded")
 
         # Create binary labels
         label_mapping = {"Not AD": 0, "High": 1}
@@ -286,16 +297,18 @@ class SEAADDataLoader:
             stratify=unique_donors[unique_donors[self.donor_column].isin(donors_train_val)]["label"],
         )
 
-        # Create splits
+        # Create splits (loads each split into memory separately)
+        logger.info("🔍 Creating train/val/test splits and loading into memory...")
         train_adata = self.adata[
             self.adata.obs[self.donor_column].isin(donors_train)
         ].copy()
         val_adata = self.adata[self.adata.obs[self.donor_column].isin(donors_val)].copy()
         test_adata = self.adata[self.adata.obs[self.donor_column].isin(donors_test)].copy()
 
-        logger.info(f"Train set: {train_adata.n_obs} cells from {donors_train.nunique()} donors")
-        logger.info(f"Val set:   {val_adata.n_obs} cells from {donors_val.nunique()} donors")
-        logger.info(f"Test set:  {test_adata.n_obs} cells from {donors_test.nunique()} donors")
+        logger.info(f"Train set: {train_adata.n_obs:,} cells from {donors_train.nunique()} donors")
+        logger.info(f"Val set:   {val_adata.n_obs:,} cells from {donors_val.nunique()} donors")
+        logger.info(f"Test set:  {test_adata.n_obs:,} cells from {donors_test.nunique()} donors")
+        logger.info(f"✓ Splits created and loaded into memory")
 
         # Log label distributions
         for split_name, split_data in [
@@ -312,12 +325,15 @@ class SEAADDataLoader:
         """
         Select highly variable genes.
 
+        For backed AnnData, loads data into memory after HVG selection
+        (more efficient than loading full data first).
+
         Args:
-            adata: AnnData object
+            adata: AnnData object (backed or in-memory)
             n_hvgs: Number of HVGs to select
 
         Returns:
-            AnnData with HVGs selected
+            AnnData with HVGs selected and loaded into memory
         """
         logger.info(f"Selecting {n_hvgs} highly variable genes")
 
@@ -325,12 +341,16 @@ class SEAADDataLoader:
         if "highly_variable" not in adata.var:
             import scanpy as sc
 
+            logger.info("📊 Computing highly variable genes...")
             sc.pp.highly_variable_genes(adata, n_top_genes=n_hvgs)
+            logger.info(f"✓ HVGs computed")
         else:
             logger.info("HVGs already computed")
 
+        # Select HVGs and load into memory
+        logger.info(f"🔍 Selecting {n_hvgs} HVGs and loading into memory...")
         adata_hvg = adata[:, adata.var.highly_variable].copy()
-        logger.info(f"Selected {adata_hvg.n_vars} highly variable genes")
+        logger.info(f"✓ Selected {adata_hvg.n_vars:,} highly variable genes and loaded into memory")
 
         return adata_hvg
 
