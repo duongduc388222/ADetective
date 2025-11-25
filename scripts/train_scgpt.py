@@ -4,8 +4,8 @@ Phase 5: Fine-tune scGPT foundation model for AD pathology classification.
 
 This script:
 1. Loads preprocessed datasets from Phase 2
-2. Creates tokenized dataloaders
-3. Initializes scGPT wrapper
+2. Creates scGPT-format tokenized dataloaders
+3. Initializes scGPT wrapper with actual scGPT library
 4. Fine-tunes with layer freezing strategy
 5. Evaluates on test set
 6. Saves results and trained model
@@ -71,7 +71,110 @@ def load_data(data_dir: Path) -> tuple:
     logger.info(f"Val:   {X_val.shape}, {y_val.shape}")
     logger.info(f"Test:  {X_test.shape}, {y_test.shape}")
 
-    return X_train, y_train, X_val, y_val, X_test, y_test
+    # Get gene names
+    gene_names = list(train_data.var_names)
+    logger.info(f"Number of genes: {len(gene_names)}")
+
+    return X_train, y_train, X_val, y_val, X_test, y_test, gene_names
+
+
+def tokenize_batch(
+    expression_data: np.ndarray,
+    gene_names: list,
+    scgpt_wrapper: scGPTWrapper,
+    max_len: int = 2048,
+) -> dict:
+    """
+    Tokenize a batch of expression data for scGPT.
+
+    Args:
+        expression_data: (batch_size, num_genes) expression matrix
+        gene_names: List of gene names
+        scgpt_wrapper: scGPT wrapper with tokenization methods
+        max_len: Maximum sequence length
+
+    Returns:
+        Dict with tokenized batch data
+    """
+    batch_tokens = {
+        "gene_ids": [],
+        "values": [],
+        "padding_mask": [],
+    }
+
+    for i in range(expression_data.shape[0]):
+        expr_values = expression_data[i]
+
+        # Prepare expression data in scGPT format
+        expression_dict = {
+            "gene_names": gene_names,
+            "values": expr_values,
+        }
+
+        # Tokenize using wrapper
+        tokens = scgpt_wrapper.tokenize_and_pad_batch(
+            expression_dict, max_len=max_len
+        )
+
+        batch_tokens["gene_ids"].append(tokens["gene_ids"])
+        batch_tokens["values"].append(tokens["values"])
+        batch_tokens["padding_mask"].append(tokens["padding_mask"])
+
+    # Stack into batch tensors
+    batch_tokens["gene_ids"] = torch.stack(batch_tokens["gene_ids"])
+    batch_tokens["values"] = torch.stack(batch_tokens["values"])
+    batch_tokens["padding_mask"] = torch.stack(batch_tokens["padding_mask"])
+
+    return batch_tokens
+
+
+class scGPTDataset(torch.utils.data.Dataset):
+    """PyTorch Dataset for scGPT tokenized data."""
+
+    def __init__(
+        self, expression_data: np.ndarray, labels: np.ndarray,
+        gene_names: list, scgpt_wrapper: scGPTWrapper,
+        max_len: int = 2048,
+    ):
+        """Initialize dataset."""
+        self.expression_data = expression_data
+        self.labels = torch.from_numpy(labels).long()
+        self.gene_names = gene_names
+        self.scgpt_wrapper = scgpt_wrapper
+        self.max_len = max_len
+
+    def __len__(self):
+        return self.expression_data.shape[0]
+
+    def __getitem__(self, idx):
+        """Get a single sample."""
+        expr_values = self.expression_data[idx]
+
+        # Tokenize single sample
+        expression_dict = {
+            "gene_names": self.gene_names,
+            "values": expr_values,
+        }
+        tokens = self.scgpt_wrapper.tokenize_and_pad_batch(
+            expression_dict, max_len=self.max_len
+        )
+
+        return {
+            "gene_ids": tokens["gene_ids"],
+            "values": tokens["values"],
+            "padding_mask": tokens["padding_mask"],
+            "label": self.labels[idx],
+        }
+
+
+def collate_scgpt_batch(batch):
+    """Collate function for scGPT dataloaders."""
+    return {
+        "gene_ids": torch.stack([b["gene_ids"] for b in batch]),
+        "values": torch.stack([b["values"] for b in batch]),
+        "padding_mask": torch.stack([b["padding_mask"] for b in batch]),
+        "labels": torch.stack([b["label"] for b in batch]),
+    }
 
 
 def create_dataloaders(
@@ -81,31 +184,47 @@ def create_dataloaders(
     y_val: np.ndarray,
     X_test: np.ndarray,
     y_test: np.ndarray,
+    gene_names: list,
+    scgpt_wrapper: scGPTWrapper,
     batch_size: int = 16,
+    max_len: int = 2048,
 ) -> tuple:
-    """Create PyTorch dataloaders."""
-    logger.info(f"Creating dataloaders with batch size {batch_size}")
+    """Create PyTorch dataloaders with scGPT tokenization."""
+    logger.info(
+        f"Creating scGPT dataloaders with batch_size={batch_size}, max_len={max_len}"
+    )
 
-    def create_loader(X, y, shuffle=True):
-        X_tensor = torch.FloatTensor(X)
-        y_tensor = torch.LongTensor(y)
-        dataset = TensorDataset(X_tensor, y_tensor)
-        return DataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=shuffle,
-            pin_memory=torch.cuda.is_available(),
-        )
+    train_dataset = scGPTDataset(X_train, y_train, gene_names, scgpt_wrapper, max_len)
+    val_dataset = scGPTDataset(X_val, y_val, gene_names, scgpt_wrapper, max_len)
+    test_dataset = scGPTDataset(X_test, y_test, gene_names, scgpt_wrapper, max_len)
 
-    train_loader = create_loader(X_train, y_train, shuffle=True)
-    val_loader = create_loader(X_val, y_val, shuffle=False)
-    test_loader = create_loader(X_test, y_test, shuffle=False)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=collate_scgpt_batch,
+        pin_memory=torch.cuda.is_available(),
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=collate_scgpt_batch,
+        pin_memory=torch.cuda.is_available(),
+    )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=collate_scgpt_batch,
+        pin_memory=torch.cuda.is_available(),
+    )
 
     return train_loader, val_loader, test_loader
 
 
 class scGPTTrainer:
-    """Simple trainer for scGPT fine-tuning."""
+    """Trainer for scGPT fine-tuning."""
 
     def __init__(
         self,
@@ -130,14 +249,20 @@ class scGPTTrainer:
         total_accuracy = 0.0
         num_batches = 0
 
-        for batch_idx, (X, y) in enumerate(train_loader):
-            X = X.to(self.device)
-            y = y.to(self.device).float().unsqueeze(1)
+        for batch_idx, batch in enumerate(train_loader):
+            gene_ids = batch["gene_ids"].to(self.device)
+            values = batch["values"].to(self.device)
+            padding_mask = batch["padding_mask"].to(self.device)
+            labels = batch["labels"].to(self.device).float().unsqueeze(1)
 
             # Forward pass
             self.optimizer.zero_grad()
-            logits = self.model(X)
-            loss = self.criterion(logits, y)
+            logits = self.model(
+                gene_ids=gene_ids,
+                values=values,
+                src_key_padding_mask=padding_mask,
+            )
+            loss = self.criterion(logits, labels)
 
             # Backward pass
             loss.backward()
@@ -152,7 +277,7 @@ class scGPTTrainer:
             # Metrics
             with torch.no_grad():
                 preds = (logits > 0).float()
-                accuracy = (preds == y).float().mean()
+                accuracy = (preds == labels).float().mean()
 
             total_loss += loss.item()
             total_accuracy += accuracy.item()
@@ -178,14 +303,20 @@ class scGPTTrainer:
         num_batches = 0
 
         with torch.no_grad():
-            for X, y in val_loader:
-                X = X.to(self.device)
-                y = y.to(self.device).float().unsqueeze(1)
+            for batch in val_loader:
+                gene_ids = batch["gene_ids"].to(self.device)
+                values = batch["values"].to(self.device)
+                padding_mask = batch["padding_mask"].to(self.device)
+                labels = batch["labels"].to(self.device).float().unsqueeze(1)
 
-                logits = self.model(X)
-                loss = self.criterion(logits, y)
+                logits = self.model(
+                    gene_ids=gene_ids,
+                    values=values,
+                    src_key_padding_mask=padding_mask,
+                )
+                loss = self.criterion(logits, labels)
                 preds = (logits > 0).float()
-                accuracy = (preds == y).float().mean()
+                accuracy = (preds == labels).float().mean()
 
                 total_loss += loss.item()
                 total_accuracy += accuracy.item()
@@ -248,7 +379,7 @@ class scGPTTrainer:
 def main():
     """Fine-tune scGPT model."""
     logger.info("=" * 80)
-    logger.info("PHASE 5: SCGPT FOUNDATION MODEL FINE-TUNING")
+    logger.info("PHASE 5: SCGPT FOUNDATION MODEL FINE-TUNING (WITH ACTUAL scGPT LIBRARY)")
     logger.info("=" * 80)
 
     # Configuration
@@ -265,41 +396,54 @@ def main():
     logger.info("STEP 1: Loading Preprocessed Data")
     logger.info("=" * 80)
     try:
-        X_train, y_train, X_val, y_val, X_test, y_test = load_data(data_dir)
+        X_train, y_train, X_val, y_val, X_test, y_test, gene_names = load_data(data_dir)
     except FileNotFoundError as e:
         logger.error(f"Error loading data: {e}")
         logger.error("Make sure you've run scripts/load.py and scripts/prepare_data.py first")
         return False
 
-    # Step 2: Create dataloaders
+    # Step 2: Initialize scGPT wrapper
     logger.info("\n" + "=" * 80)
-    logger.info("STEP 2: Creating Dataloaders")
+    logger.info("STEP 2: Initializing scGPT Wrapper")
     logger.info("=" * 80)
-    batch_size = 16  # Smaller batch size for large models
+
+    try:
+        model = scGPTWrapper(
+            gene_names=gene_names,
+            pretrained_path=None,  # No pretrained weights unless provided
+            vocab_path=None,  # Create vocabulary from dataset genes
+            n_bins=51,
+            d_model=512,
+            nhead=8,
+            num_layers=12,
+            freeze_layers=6,  # Freeze bottom 6 of 12 layers
+            dropout=0.1,
+            do_mvc=False,  # Disabled for classification fine-tuning
+            do_dab=False,
+            do_ecs=False,
+            use_batch_labels=False,
+            explicit_zero_prob=False,
+            use_fast_transformer=True,
+        )
+        logger.info("✓ scGPT model initialized successfully")
+    except ImportError as e:
+        logger.error(f"Failed to initialize scGPT: {e}")
+        logger.error("Install scGPT with: pip install scgpt")
+        return False
+
+    # Step 3: Create dataloaders
+    logger.info("\n" + "=" * 80)
+    logger.info("STEP 3: Creating scGPT-format Dataloaders")
+    logger.info("=" * 80)
+    batch_size = 16  # Smaller batch size for large model
+    max_len = min(2048, X_train.shape[1])
+
     train_loader, val_loader, test_loader = create_dataloaders(
-        X_train, y_train, X_val, y_val, X_test, y_test, batch_size=batch_size
+        X_train, y_train, X_val, y_val, X_test, y_test,
+        gene_names, model,
+        batch_size=batch_size,
+        max_len=max_len,
     )
-
-    # Step 3: Initialize scGPT wrapper
-    logger.info("\n" + "=" * 80)
-    logger.info("STEP 3: Initializing scGPT Wrapper")
-    logger.info("=" * 80)
-    num_genes = X_train.shape[1]
-
-    model = scGPTWrapper(
-        num_genes=num_genes,
-        pretrained_path=None,  # No pretrained weights available
-        vocab_path=None,  # Use default vocabulary
-        n_bins=51,
-        d_model=512,
-        nhead=8,
-        num_layers=12,
-        freeze_layers=6,  # Freeze bottom 6 layers
-        dropout=0.1,
-    )
-
-    logger.info(f"Model created with {sum(p.numel() for p in model.parameters()):,} parameters")
-    logger.info(f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
 
     # Step 4: Create fine-tuner
     logger.info("\n" + "=" * 80)
@@ -308,7 +452,7 @@ def main():
 
     finetuner = scGPTFineTuner(
         model=model,
-        learning_rate=5e-5,
+        learning_rate=1e-5,  # Very low LR for fine-tuning
         warmup_steps=500,
         weight_decay=0.01,
     )
@@ -355,13 +499,15 @@ def main():
 
     results = {
         "config": {
-            "num_genes": num_genes,
+            "num_genes": len(gene_names),
             "n_bins": 51,
             "d_model": 512,
             "nhead": 8,
             "num_layers": 12,
             "freeze_layers": 6,
             "batch_size": batch_size,
+            "max_sequence_length": max_len,
+            "model_type": "scGPT (actual library)",
         },
         "training_history": {
             "train_loss": history["train_loss"],

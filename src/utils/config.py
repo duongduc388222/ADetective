@@ -52,7 +52,7 @@ class Config:
         self.config_dict = {
             "environment": "local",
             "data": {
-                "path": "/Users/duonghongduc/GrinnellCollege/MLAI/Data/Oligodendrocytes_Subset.h5ad",
+                "path": "/Users/duonghongduc/GrinnellCollege/MLAI/Data/SEAAD_A9_RNAseq_DREAM_Cleaned.h5ad",
                 "cache_dir": self.project_root / "data",
             },
             "output": {

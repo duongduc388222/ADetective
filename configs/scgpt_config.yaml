@@ -1,37 +1,82 @@
-# scGPT Foundation Model Configuration
+# scGPT Foundation Model Fine-tuning Configuration
+# Integration with actual scGPT library: https://github.com/bowang-lab/scGPT
+
 model:
+  # Expression binning parameters (scGPT standard)
   n_bins: 51                    # Number of expression bins for tokenization
-  d_model: 512                  # Model dimension (matches pretrained scGPT)
+
+  # Transformer architecture (matches pretrained scGPT)
+  d_model: 512                  # Model embedding dimension
   nhead: 8                      # Number of attention heads
-  num_layers: 12                # Number of transformer layers
+  num_layers: 12                # Number of transformer encoder layers
+  d_hid: 2048                   # Hidden dimension in feedforward (4x d_model)
   dropout: 0.1                  # Dropout rate
-  use_fast_tokenizer: true      # Use optimized tokenizer
-  freeze_layers: 6              # Freeze bottom 6 layers for efficient fine-tuning
+
+  # Auxiliary objectives for multi-task learning
+  do_mvc: true                  # Masked Value Correction objective
+  do_dab: false                 # Domain Adaptation by Batch norm
+  do_ecs: false                 # Elastic Cell Similarity
+  use_batch_labels: false       # Enable DSBN with batch labels
+  explicit_zero_prob: false     # Model explicit zero probability
+
+  # Efficiency settings
+  use_fast_transformer: true    # Use Flash Attention (PyTorch 2.0+)
+  freeze_layers: 6              # Freeze bottom 6 of 12 layers for efficient fine-tuning
+
+  # Gene vocabulary
+  vocab_type: "gene_vocab"      # scGPT GeneVocab format
+  pretrained_vocab_path: null   # Path to pretrained vocabulary (if available)
 
 # Fine-tuning Configuration
 training:
-  learning_rate: 0.00005        # Lower learning rate for fine-tuning
-  weight_decay: 0.01            # Higher weight decay for regularization
-  gradient_accumulation_steps: 4  # Accumulate gradients for larger effective batch
-  max_grad_norm: 1.0            # Gradient clipping
-  early_stopping:
-    enabled: true
-    patience: 3                 # Early stopping patience (fewer epochs for fine-tuning)
+  learning_rate: 0.00001        # 1e-5: Lower learning rate for fine-tuning
+  weight_decay: 0.01            # L2 regularization (higher for fine-tuning)
+  optimizer: "adamw"            # AdamW optimizer
+
+  # Learning rate schedule
   warmup:
     enabled: true
-    steps: 500                  # Warmup steps
+    steps: 500                  # Linear warmup over 500 steps
+
+  # Gradient handling
+  max_grad_norm: 1.0            # Gradient clipping
+  gradient_accumulation_steps: 1  # Can increase for larger effective batch
+
+  # Early stopping
+  early_stopping:
+    enabled: true
+    patience: 3                 # Stop if validation loss doesn't improve for 3 epochs
+
+  # Number of epochs
+  epochs: 15                    # Fewer epochs for fine-tuning (vs 30+ for training from scratch)
 
 # Data Configuration
 data:
-  batch_size: 16                # Smaller batch size due to model size
-  num_workers: 0
+  batch_size: 16                # Batch size (smaller due to model size)
+  num_workers: 0                # Single-threaded data loading
+  max_seq_length: 2048          # Maximum sequence length (genes per cell)
+
+  # Tokenization
+  tokenization:
+    type: "expression_binning"  # Use quantile-based binning
+    method: "scgpt"             # scGPT-compatible tokenization
+    pad_value: 0                # Padding bin value
 
 # Logging Configuration
 logging:
-  log_frequency: 50             # Log every N batches
+  log_frequency: 50             # Log metrics every N batches
+  save_frequency: 5             # Save checkpoint every N epochs
+  verbosity: "info"             # Log level
 
 # Experiment Configuration
 experiment:
-  seed: 42
-  num_epochs: 15                # Fewer epochs for fine-tuning
-  mixed_precision: bf16         # Use bfloat16 if available
+  seed: 42                      # Random seed for reproducibility
+  mixed_precision: "bf16"       # Use bfloat16 if available (better for transformers)
+  device: "cuda"                # Use GPU (falls back to CPU if unavailable)
+
+  # Model checkpointing
+  save_best_only: true          # Only save best checkpoint by validation loss
+  checkpoint_dir: "results/scgpt/checkpoints"
+
+  # Output
+  output_format: "h5ad"         # Save cell embeddings in AnnData format

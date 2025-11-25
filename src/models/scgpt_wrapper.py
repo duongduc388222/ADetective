@@ -1,17 +1,16 @@
 """
 scGPT Wrapper for Fine-tuning Foundation Model.
 
-Wraps scGPT for fine-tuning on AD pathology classification with:
-- Gene vocabulary alignment
-- Expression binning/tokenization
-- Classification head addition
-- Efficient fine-tuning setup
+Wraps scGPT (https://github.com/bowang-lab/scGPT) for fine-tuning on AD pathology
+classification with gene vocabulary alignment, expression tokenization, and efficient fine-tuning.
 """
+
+from __future__ import annotations
 
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -19,23 +18,41 @@ import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 
+if TYPE_CHECKING:
+    from scgpt.tokenizer.gene_tokenizer import GeneVocab
+
 logger = logging.getLogger(__name__)
+
+# Try to import actual scGPT library
+try:
+    import scgpt as scg
+    from scgpt.model import TransformerModel
+    from scgpt.tokenizer.gene_tokenizer import GeneVocab
+    from scgpt.loss import masked_mse_loss, criterion_neg_log_bernoulli
+    SCGPT_AVAILABLE = True
+except ImportError:
+    logger.warning(
+        "scGPT library not installed. Install with: "
+        "pip install scgpt or git+https://github.com/bowang-lab/scGPT.git"
+    )
+    SCGPT_AVAILABLE = False
 
 
 class scGPTWrapper(nn.Module):
     """
     Wrapper for scGPT foundation model fine-tuning.
 
-    Handles:
-    - Gene vocabulary alignment
-    - Expression binning/tokenization
-    - Classification head addition
-    - Fine-tuning setup
+    This wrapper provides:
+    - Integration with actual scGPT's TransformerModel
+    - Gene vocabulary management using GeneVocab
+    - Expression binning and tokenization
+    - Layer freezing for efficient fine-tuning
+    - Support for multi-task training (classification + MVC)
     """
 
     def __init__(
         self,
-        num_genes: int,
+        gene_names: List[str],
         pretrained_path: Optional[str] = None,
         vocab_path: Optional[str] = None,
         n_bins: int = 51,
@@ -44,32 +61,50 @@ class scGPTWrapper(nn.Module):
         num_layers: int = 12,
         freeze_layers: int = 0,
         dropout: float = 0.1,
-        use_fast_tokenizer: bool = True,
+        do_mvc: bool = True,
+        do_dab: bool = False,
+        do_ecs: bool = False,
+        use_batch_labels: bool = False,
+        explicit_zero_prob: bool = False,
+        use_fast_transformer: bool = True,
     ):
         """
         Initialize scGPT wrapper.
 
         Args:
-            num_genes: Number of genes in dataset
+            gene_names: List of gene names in dataset
             pretrained_path: Path to pretrained scGPT checkpoint
-            vocab_path: Path to gene vocabulary file
-            n_bins: Number of expression bins for tokenization
-            d_model: Model dimension
+            vocab_path: Path to gene vocabulary file (GeneVocab format)
+            n_bins: Number of expression bins (scGPT standard: 51)
+            d_model: Model embedding dimension (scGPT standard: 512)
             nhead: Number of attention heads
-            num_layers: Number of transformer layers
+            num_layers: Number of transformer encoder layers (scGPT standard: 12)
             freeze_layers: Number of layers to freeze from bottom
             dropout: Dropout rate
-            use_fast_tokenizer: Use optimized tokenizer
+            do_mvc: Enable Masked Value Correction
+            do_dab: Enable Domain Adaptation by Batch norm
+            do_ecs: Enable Elastic Cell Similarity
+            use_batch_labels: Use batch labels for DSBN
+            explicit_zero_prob: Model explicit zero probability
+            use_fast_transformer: Use Flash Attention if available
         """
         super().__init__()
 
-        self.num_genes = num_genes
+        if not SCGPT_AVAILABLE:
+            raise ImportError(
+                "scGPT library is required. Install with:\n"
+                "pip install scgpt\n"
+                "or from source:\n"
+                "pip install git+https://github.com/bowang-lab/scGPT.git"
+            )
+
+        self.gene_names = gene_names
         self.n_bins = n_bins
         self.d_model = d_model
         self.freeze_layers = freeze_layers
 
-        logger.info(f"Initializing scGPTWrapper:")
-        logger.info(f"  Number of genes: {num_genes}")
+        logger.info(f"Initializing scGPT Wrapper:")
+        logger.info(f"  Number of genes: {len(gene_names)}")
         logger.info(f"  Model dimension: {d_model}")
         logger.info(f"  Number of heads: {nhead}")
         logger.info(f"  Number of layers: {num_layers}")
@@ -77,50 +112,37 @@ class scGPTWrapper(nn.Module):
         logger.info(f"  Frozen layers: {freeze_layers}")
 
         # Load or create gene vocabulary
-        self.gene_vocab = self._load_gene_vocab(vocab_path, num_genes)
-        self.vocab_size = len(self.gene_vocab)
+        self.gene_vocab = self._load_gene_vocab(vocab_path, gene_names)
 
-        # Expression binning thresholds
-        self.register_buffer('bin_edges', self._create_bin_edges(n_bins))
-
-        # Token embeddings (genes * bins + special tokens)
-        self.n_tokens = self.vocab_size * n_bins + 10  # +10 for special tokens
-        self.token_embeddings = nn.Embedding(self.n_tokens, d_model)
-
-        # Special token IDs
-        self.cls_token_id = self.n_tokens - 3
-        self.pad_token_id = self.n_tokens - 2
-        self.mask_token_id = self.n_tokens - 1
-
-        # Position embeddings
-        self.position_embeddings = nn.Embedding(4096, d_model)  # Max 4096 genes
-
-        # Layer norm
-        self.ln_input = nn.LayerNorm(d_model)
-
-        # Transformer encoder
-        encoder_layer = nn.TransformerEncoderLayer(
+        # Create scGPT's TransformerModel
+        self.transformer = TransformerModel(
+            ntoken=len(self.gene_vocab),
             d_model=d_model,
             nhead=nhead,
-            dim_feedforward=d_model * 4,
+            d_hid=d_model * 4,  # scGPT uses 4x hidden dimension
+            nlayers=num_layers,
+            nlayers_cls=1,  # Single classification head layer
+            n_input_bins=n_bins,
             dropout=dropout,
-            activation='gelu',
-            batch_first=True,
-            norm_first=True,
+            do_mvc=do_mvc,
+            do_dab=do_dab,
+            ecs_threshold=0.8 if do_ecs else 0.0,
+            use_batch_labels=use_batch_labels,
+            domain_spec_batchnorm=False,  # Can be enabled with batch labels
+            explicit_zero_prob=explicit_zero_prob,
+            use_fast_transformer=use_fast_transformer,
+            pre_norm=False,
+            vocab=self.gene_vocab,
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers)
 
-        # Classification head
+        # Classification head (for AD classification task)
         self.classifier = nn.Sequential(
             nn.LayerNorm(d_model),
             nn.Linear(d_model, d_model // 2),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(d_model // 2, 1)
+            nn.Linear(d_model // 2, 1),
         )
-
-        # Initialize weights
-        self._initialize_weights()
 
         # Load pretrained weights if available
         if pretrained_path and Path(pretrained_path).exists():
@@ -129,183 +151,241 @@ class scGPTWrapper(nn.Module):
         # Freeze layers if specified
         self._freeze_layers()
 
-    def _load_gene_vocab(self, vocab_path: Optional[str], num_genes: int) -> Dict[str, int]:
-        """Load gene vocabulary from file or create default."""
+        logger.info(f"Total parameters: {sum(p.numel() for p in self.parameters()):,}")
+        logger.info(
+            f"Trainable parameters: "
+            f"{sum(p.numel() for p in self.parameters() if p.requires_grad):,}"
+        )
+
+    def _load_gene_vocab(
+        self, vocab_path: Optional[str], gene_names: List[str]
+    ) -> "GeneVocab":
+        """Load or create GeneVocab from scGPT."""
         if vocab_path and Path(vocab_path).exists():
-            with open(vocab_path, 'r') as f:
-                vocab = json.load(f)
-            logger.info(f"Loaded gene vocabulary with {len(vocab)} genes")
-        else:
-            # Create dummy vocabulary (will be replaced with actual genes)
-            vocab = {f"GENE_{i}": i for i in range(min(num_genes, 2000))}
-            logger.warning(f"Using dummy gene vocabulary with {len(vocab)} genes")
-        return vocab
-
-    def _create_bin_edges(self, n_bins: int) -> torch.Tensor:
-        """Create expression bin edges for discretization."""
-        # Create log-spaced bins for expression values
-        # Assuming log-normalized data roughly in range [0, 10]
-        edges = torch.linspace(0, 10, n_bins + 1)
-        return edges
-
-    def _initialize_weights(self):
-        """Initialize model weights."""
-        nn.init.normal_(self.token_embeddings.weight, mean=0.0, std=0.02)
-        nn.init.normal_(self.position_embeddings.weight, mean=0.0, std=0.02)
-
-        for module in self.classifier.modules():
-            if isinstance(module, nn.Linear):
-                nn.init.xavier_uniform_(module.weight)
-                if module.bias is not None:
-                    nn.init.zeros_(module.bias)
-
-    def _load_pretrained_model(self, checkpoint_path: str):
-        """Load pretrained scGPT model."""
-        logger.info(f"Loading pretrained model from {checkpoint_path}")
-        try:
-            checkpoint = torch.load(checkpoint_path, map_location='cpu')
-
-            # Load transformer weights
-            if 'model_state_dict' in checkpoint:
-                state_dict = checkpoint['model_state_dict']
-                # Filter for transformer weights
-                transformer_state = {
-                    k.replace('transformer.', ''): v
-                    for k, v in state_dict.items()
-                    if 'transformer' in k
-                }
-                if transformer_state:
-                    self.transformer.load_state_dict(transformer_state, strict=False)
-
-            # Load embeddings if available
-            if 'token_embeddings' in checkpoint:
-                self.token_embeddings.load_state_dict(
-                    checkpoint['token_embeddings'], strict=False
+            try:
+                # Load pretrained vocabulary
+                vocab = GeneVocab.from_file(vocab_path)
+                logger.info(
+                    f"Loaded pretrained gene vocabulary with {len(vocab)} genes"
                 )
+            except Exception as e:
+                logger.warning(f"Could not load vocab from {vocab_path}: {e}")
+                logger.info("Creating new vocabulary from dataset genes")
+                vocab = GeneVocab()
+                for gene in gene_names:
+                    vocab.append_token(gene)
+        else:
+            # Create vocabulary from dataset genes
+            vocab = GeneVocab()
+            for gene in gene_names:
+                vocab.append_token(gene)
+            logger.info(f"Created gene vocabulary from dataset with {len(vocab)} genes")
 
-            logger.info("Pretrained weights loaded successfully")
-        except Exception as e:
-            logger.warning(f"Could not load pretrained model: {e}")
+        # Add special tokens if not present
+        special_tokens = ["<pad>", "<cls>", "<eos>", "<mask>"]
+        for token in special_tokens:
+            if token not in vocab:
+                vocab.append_token(token)
+
+        # Set default index for padding
+        vocab.set_default_index(vocab["<pad>"])
+
+        return vocab
 
     def _freeze_layers(self):
         """Freeze specified number of bottom transformer layers."""
         if self.freeze_layers > 0:
             # Freeze embeddings
-            for param in self.token_embeddings.parameters():
-                param.requires_grad = False
-            for param in self.position_embeddings.parameters():
+            for param in self.transformer.embeddings.parameters():
                 param.requires_grad = False
 
             # Freeze transformer layers
-            if hasattr(self, 'transformer'):
-                layers = self.transformer.layers
+            if hasattr(self.transformer, "encoder"):
+                layers = self.transformer.encoder.layers
                 for i in range(min(self.freeze_layers, len(layers))):
                     for param in layers[i].parameters():
                         param.requires_grad = False
 
             logger.info(f"Froze {self.freeze_layers} transformer layers and embeddings")
 
-    def tokenize_expression(
+    def _load_pretrained_model(self, checkpoint_path: str):
+        """Load pretrained scGPT model from checkpoint."""
+        logger.info(f"Loading pretrained scGPT from {checkpoint_path}")
+
+        try:
+            checkpoint = torch.load(checkpoint_path, map_location="cpu")
+
+            # Handle different checkpoint formats
+            if "model_state_dict" in checkpoint:
+                model_state = checkpoint["model_state_dict"]
+            elif "state_dict" in checkpoint:
+                model_state = checkpoint["state_dict"]
+            else:
+                model_state = checkpoint
+
+            # Remove 'module.' prefix if present (from DataParallel)
+            model_state = {
+                k.replace("module.", ""): v for k, v in model_state.items()
+            }
+
+            # Load weights with strict=False to allow missing classifier head
+            missing_keys, unexpected_keys = self.transformer.load_state_dict(
+                model_state, strict=False
+            )
+
+            logger.info("Pretrained weights loaded successfully")
+            if missing_keys:
+                logger.info(f"Missing keys (expected): {missing_keys[:5]}")
+            if unexpected_keys:
+                logger.info(f"Unexpected keys: {unexpected_keys[:5]}")
+
+            # Load vocabulary if present in checkpoint
+            if "vocab" in checkpoint:
+                self.gene_vocab = checkpoint["vocab"]
+                logger.info(f"Loaded vocabulary with {len(self.gene_vocab)} genes")
+
+        except Exception as e:
+            logger.error(f"Failed to load pretrained model: {e}")
+            raise
+
+    def tokenize_and_pad_batch(
         self,
-        expression_matrix: torch.Tensor,
-        gene_indices: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        expression_data: Dict[str, np.ndarray],
+        max_len: int = 2048,
+        pad_value: int = 0,
+    ) -> Dict[str, torch.Tensor]:
         """
-        Tokenize expression matrix into token IDs.
+        Tokenize expression data to scGPT format.
 
         Args:
-            expression_matrix: Expression values (batch_size, n_genes)
-            gene_indices: Indices of genes in vocabulary (batch_size, n_genes)
+            expression_data: Dict with keys:
+                - "gene_names": List[str] - gene names
+                - "values": np.ndarray of shape (n_genes,) - expression values
+            max_len: Maximum sequence length
+            pad_value: Padding value for binned expression
 
         Returns:
-            token_ids: Token IDs (batch_size, seq_len)
-            attention_mask: Attention mask (batch_size, seq_len)
+            Dict with:
+                - "gene_ids": token IDs (seq_len,)
+                - "values": binned expression values (seq_len,)
+                - "padding_mask": boolean mask (seq_len,)
         """
-        batch_size, n_genes = expression_matrix.shape
-        device = expression_matrix.device
+        gene_names = expression_data["gene_names"]
+        values = expression_data["values"]
 
-        # Use gene indices if provided, otherwise use sequential indices
-        if gene_indices is None:
-            gene_indices = torch.arange(
-                min(n_genes, self.vocab_size), device=device
-            ).unsqueeze(0).expand(batch_size, -1)
+        # Map genes to vocabulary
+        gene_ids = []
+        gene_values = []
+        for gene, value in zip(gene_names, values):
+            if gene in self.gene_vocab and value > 0:  # Filter zero genes
+                gene_ids.append(self.gene_vocab[gene])
+                gene_values.append(value)
 
-        # Clamp to valid vocab size
-        gene_indices = torch.clamp(gene_indices, 0, self.vocab_size - 1)
+        # Limit sequence length
+        if len(gene_ids) > max_len:
+            # Keep top genes by expression
+            sorted_idx = np.argsort(gene_values)[::-1][:max_len]
+            gene_ids = [gene_ids[i] for i in sorted_idx]
+            gene_values = [gene_values[i] for i in sorted_idx]
 
-        # Discretize expression values into bins
-        expression_bins = torch.bucketize(
-            expression_matrix, self.bin_edges.to(device)
-        )
-        expression_bins = torch.clamp(expression_bins, 0, self.n_bins - 1)
+        # Bin expression values (0-51)
+        binned_values = self._bin_expression(np.array(gene_values))
 
-        # Create token IDs: gene_id * n_bins + bin_id
-        token_ids = gene_indices * self.n_bins + expression_bins
+        # Pad to max_len
+        pad_len = max_len - len(gene_ids)
+        if pad_len > 0:
+            pad_token_id = self.gene_vocab["<pad>"]
+            gene_ids = gene_ids + [pad_token_id] * pad_len
+            binned_values = np.concatenate([binned_values, np.zeros(pad_len, dtype=int)])
 
-        # Add CLS token at the beginning
-        cls_tokens = torch.full(
-            (batch_size, 1), self.cls_token_id,
-            dtype=torch.long, device=device
-        )
-        token_ids = torch.cat([cls_tokens, token_ids], dim=1)
+        gene_ids = np.array(gene_ids, dtype=np.int64)
+        binned_values = np.array(binned_values, dtype=np.int64)
 
-        # Create attention mask (all ones for valid tokens)
-        attention_mask = torch.ones_like(token_ids)
+        # Create padding mask (True for padding positions)
+        padding_mask = gene_ids == self.gene_vocab["<pad>"]
 
-        return token_ids, attention_mask
+        return {
+            "gene_ids": torch.from_numpy(gene_ids).long(),
+            "values": torch.from_numpy(binned_values).long(),
+            "padding_mask": torch.from_numpy(padding_mask),
+        }
 
-    def forward(self, expression_matrix: torch.Tensor) -> torch.Tensor:
+    def _bin_expression(self, values: np.ndarray) -> np.ndarray:
         """
-        Forward pass for classification.
+        Bin expression values using quantile-based binning (scGPT approach).
 
         Args:
-            expression_matrix: Expression values (batch_size, n_genes)
+            values: Non-zero expression values
 
         Returns:
-            Logits for binary classification (batch_size, 1)
+            Binned values in range [1, n_bins]
         """
-        batch_size = expression_matrix.size(0)
-        device = expression_matrix.device
+        if len(values) == 0:
+            return np.array([], dtype=int)
 
-        # Tokenize expression
-        token_ids, attention_mask = self.tokenize_expression(expression_matrix)
+        # Quantile-based binning
+        quantiles = np.linspace(0, 100, self.n_bins)
+        bin_edges = np.percentile(values, quantiles)
 
-        # Get token embeddings
-        token_embeds = self.token_embeddings(token_ids)
+        # Digitize: returns bin index (1 to n_bins)
+        binned = np.digitize(values, bin_edges[1:-1]) + 1
+        binned = np.clip(binned, 1, self.n_bins)
 
-        # Add position embeddings
-        positions = torch.arange(token_ids.size(1), device=device)
-        position_embeds = self.position_embeddings(positions)
-        embeddings = token_embeds + position_embeds.unsqueeze(0)
+        return binned
 
-        # Layer norm
-        embeddings = self.ln_input(embeddings)
+    def forward(
+        self,
+        gene_ids: torch.Tensor,
+        values: torch.Tensor,
+        src_key_padding_mask: Optional[torch.Tensor] = None,
+        batch_labels: Optional[torch.Tensor] = None,
+        output_cell_embeddings: bool = True,
+    ) -> torch.Tensor:
+        """
+        Forward pass using scGPT model.
 
-        # Create attention mask for transformer (1.0 = attend, 0.0 = ignore)
-        # For padding tokens, we don't attend
-        src_key_padding_mask = (attention_mask == 0)
+        Args:
+            gene_ids: Gene token IDs from vocabulary (batch_size, seq_len)
+            values: Binned expression values (batch_size, seq_len)
+            src_key_padding_mask: Padding mask - True for padding positions
+            batch_labels: Batch labels for domain adaptation (optional)
+            output_cell_embeddings: Whether to return cell embeddings
 
-        # Pass through transformer
-        transformer_output = self.transformer(
-            embeddings, src_key_padding_mask=src_key_padding_mask
+        Returns:
+            Classification logits (batch_size, 1)
+        """
+        # Get transformer outputs
+        output_dict = self.transformer(
+            gene_ids,
+            values,
+            src_key_padding_mask=src_key_padding_mask,
+            batch_labels=batch_labels,
+            CLS=True,
+            MVC=False,  # No masking during inference
+            ECS=False,
         )
 
-        # Extract CLS token representation
-        cls_output = transformer_output[:, 0, :]
+        # Extract cell embeddings (CLS token or mean pooling from scGPT)
+        # scGPT returns 'cell_emb' for the cell-level representation
+        if "cell_emb" in output_dict:
+            cell_emb = output_dict["cell_emb"]
+        else:
+            # Fallback: use CLS token output (first token)
+            cell_emb = output_dict["last_hidden_state"][:, 0, :]
 
-        # Classification
-        logits = self.classifier(cls_output)
+        # Classification head
+        logits = self.classifier(cell_emb)
 
         return logits
 
 
 class scGPTFineTuner:
-    """Helper class for fine-tuning scGPT models."""
+    """Helper class for fine-tuning scGPT models with custom objectives."""
 
     def __init__(
         self,
         model: scGPTWrapper,
-        learning_rate: float = 5e-5,
+        learning_rate: float = 1e-5,
         warmup_steps: int = 500,
         weight_decay: float = 0.01,
     ):
@@ -313,10 +393,10 @@ class scGPTFineTuner:
         Initialize fine-tuner.
 
         Args:
-            model: scGPT model to fine-tune
-            learning_rate: Learning rate for fine-tuning
+            model: scGPT wrapper model to fine-tune
+            learning_rate: Learning rate (lower for fine-tuning)
             warmup_steps: Number of warmup steps
-            weight_decay: Weight decay for regularization
+            weight_decay: L2 regularization weight
         """
         self.model = model
         self.learning_rate = learning_rate
@@ -324,11 +404,14 @@ class scGPTFineTuner:
         self.weight_decay = weight_decay
 
         # Count trainable parameters
-        trainable_params = sum(p.numel() for p in model.parameters()
-                              if p.requires_grad)
+        trainable_params = sum(
+            p.numel() for p in model.parameters() if p.requires_grad
+        )
         total_params = sum(p.numel() for p in model.parameters())
         logger.info(f"Trainable parameters: {trainable_params:,} / {total_params:,}")
-        logger.info(f"Percentage trainable: {100 * trainable_params / total_params:.2f}%")
+        logger.info(
+            f"Percentage trainable: {100 * trainable_params / total_params:.2f}%"
+        )
 
     def create_optimizer_and_scheduler(
         self,
@@ -337,32 +420,36 @@ class scGPTFineTuner:
         """
         Create optimizer and learning rate scheduler.
 
+        Uses different weight decay for embeddings and biases (no decay).
+
         Args:
             num_training_steps: Total number of training steps
 
         Returns:
-            Optimizer and scheduler
+            Optimizer and scheduler tuple
         """
         # Separate parameters for different weight decay
-        no_decay = ["bias", "LayerNorm", "ln"]
+        no_decay = ["bias", "LayerNorm", "ln", "embedding"]
         optimizer_grouped_parameters = [
             {
                 "params": [
-                    p for n, p in self.model.named_parameters()
+                    p
+                    for n, p in self.model.named_parameters()
                     if p.requires_grad and not any(nd in n for nd in no_decay)
                 ],
                 "weight_decay": self.weight_decay,
             },
             {
                 "params": [
-                    p for n, p in self.model.named_parameters()
+                    p
+                    for n, p in self.model.named_parameters()
                     if p.requires_grad and any(nd in n for nd in no_decay)
                 ],
                 "weight_decay": 0.0,
             },
         ]
 
-        # AdamW optimizer
+        # AdamW optimizer with epsilon for stability
         optimizer = AdamW(
             optimizer_grouped_parameters,
             lr=self.learning_rate,
@@ -370,48 +457,15 @@ class scGPTFineTuner:
             eps=1e-8,
         )
 
-        # Cosine schedule with warmup
+        # Cosine learning rate schedule with warmup
         def lr_lambda(current_step: int):
             if current_step < self.warmup_steps:
                 return float(current_step) / float(max(1, self.warmup_steps))
-            progress = float(current_step - self.warmup_steps) / \
-                      float(max(1, num_training_steps - self.warmup_steps))
+            progress = float(current_step - self.warmup_steps) / float(
+                max(1, num_training_steps - self.warmup_steps)
+            )
             return max(0.0, 0.5 * (1.0 + np.cos(np.pi * progress)))
 
         scheduler = LambdaLR(optimizer, lr_lambda)
 
         return optimizer, scheduler
-
-    def align_gene_vocabulary(
-        self,
-        dataset_genes: List[str],
-        model_genes: List[str],
-    ) -> Dict[str, str]:
-        """
-        Align dataset genes with model vocabulary.
-
-        Args:
-            dataset_genes: Gene names from dataset
-            model_genes: Gene names from model vocabulary
-
-        Returns:
-            Mapping from dataset genes to model genes
-        """
-        gene_mapping = {}
-
-        # Direct matching (case-insensitive)
-        model_genes_upper = {g.upper(): g for g in model_genes}
-
-        for gene in dataset_genes:
-            gene_upper = gene.upper()
-            if gene_upper in model_genes_upper:
-                gene_mapping[gene] = model_genes_upper[gene_upper]
-
-        logger.info(f"Matched {len(gene_mapping)} / {len(dataset_genes)} genes")
-
-        # Report unmatched genes
-        unmatched = set(dataset_genes) - set(gene_mapping.keys())
-        if unmatched:
-            logger.warning(f"Unmatched genes: {len(unmatched)}")
-
-        return gene_mapping
