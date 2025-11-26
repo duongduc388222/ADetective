@@ -1,41 +1,32 @@
 # Core dependencies
-numpy==1.24.3
-pandas==2.0.3
-scipy==1.11.1
-scikit-learn==1.3.0
+numpy>=1.24.0,<2.0.0
+pandas>=2.0.0,<3.0.0
+scipy>=1.11.0
+scikit-learn>=1.3.0
 
 # Data handling
-anndata==0.10.1
-scanpy==1.9.3
+anndata>=0.10.0
+scanpy>=1.9.0
 
-# PyTorch
-torch==2.1.0
-torchvision==0.16.0
+# PyTorch - compatible with Colab
+torch>=2.0.0
+torchvision>=0.15.0
 
 # Training utilities
-accelerate==0.24.0
-transformers==4.34.0
-
-# Mixed precision & optimization
-apex>=0.1  # Optional, for advanced mixed precision
+accelerate>=0.24.0
+transformers>=4.34.0
 
 # Evaluation & metrics
-scikit-metrics==0.1.4
-matplotlib==3.7.2
-seaborn==0.12.2
-
-# Logging & monitoring
-wandb==0.15.8
-tensorboard==2.14.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+scikit-learn>=1.3.0  # For metrics
 
 # Utilities
-tqdm==4.66.1
-pyyaml==6.0.1
-python-dotenv==1.0.0
-click==8.1.7
+tqdm>=4.66.0
+pyyaml>=6.0.0
+python-dotenv>=1.0.0
+click>=8.1.0
 
-# Development
-pytest==7.4.0
-black==23.9.1
-isort==5.12.0
-flake8==6.1.0
+# Optional: Logging & monitoring (comment out if not needed)
+# wandb>=0.15.0
+# tensorboard>=2.14.0

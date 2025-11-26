@@ -56,41 +56,95 @@ pip install -e .
 
 2. **Set Runtime**: Go to `Runtime > Change runtime type > GPU`
 
-3. **Mount Drive & Install**:
+3. **Mount Drive & Install Dependencies**:
 ```python
 from google.colab import drive
 drive.mount('/content/drive')
 
 !git clone https://github.com/[username]/ADetective.git
 %cd ADetective
-!pip install -q -r requirements.txt
+
+# Use Colab-optimized requirements (faster, fewer conflicts)
+!pip install -q -r requirements-colab.txt
+
+# Or use full requirements if needed:
+# !pip install -q -r requirements.txt
 ```
 
-4. **Upload Data**: Upload `SEAAD_A9_RNAseq_DREAM.2025-07-15.h5ad` to your Google Drive
+**Note**: Google Colab comes with many packages pre-installed (numpy, pandas, scipy, PyTorch, etc.). Using `requirements-colab.txt` is faster and avoids compatibility issues. Only upgrade if necessary.
+
+4. **Copy Data to Colab**:
+```bash
+# Copy cleaned dataset to Colab workspace
+!cp /content/drive/MyDrive/SEAAD_A9_RNAseq_DREAM_Cleaned.h5ad ./data/
+```
 
 5. **Run Pipeline**:
+
+#### Step 1: Train MLP Baseline
 ```bash
-# Preprocess data
-!python scripts/explore_data.py \
-    --data-path /content/drive/MyDrive/SEAAD_A9_RNAseq_DREAM.2025-07-15.h5ad \
-    --output-dir ./results/exploration
-
-# Train MLP
-!accelerate launch scripts/train_mlp.py \
-    --data-path ./results/exploration/processed_oligodendrocytes.h5ad \
-    --output-dir ./results/mlp \
+accelerate launch --multi_gpu scripts/train_mlp.py \
+    --data-path ./data/SEAAD_A9_RNAseq_DREAM_Cleaned.h5ad \
+    --cell-type Oligodendrocyte \
     --precision bf16
-
-# Train Transformer
-!accelerate launch scripts/train_transformer.py \
-    --data-path ./results/exploration/processed_oligodendrocytes.h5ad \
-    --output-dir ./results/transformer \
-    --precision bf16
-
-# Compare models
-!python scripts/compare_models.py \
-    --results-dir ./results
 ```
+
+**Input**:
+- `./data/SEAAD_A9_RNAseq_DREAM_Cleaned.h5ad` (cleaned single-cell RNA-seq data)
+
+**Output**:
+- `./results/mlp/model.pt` (trained MLP weights)
+- `./results/mlp/results.yaml` (metrics: accuracy, F1, ROC-AUC)
+- `./results/mlp/train_logs.json` (training history)
+
+#### Step 2: Train Transformer
+```bash
+accelerate launch --multi_gpu scripts/train_transformer.py \
+    --data-path ./data/SEAAD_A9_RNAseq_DREAM_Cleaned.h5ad \
+    --cell-type Oligodendrocyte \
+    --use-flash-attn \
+    --precision bf16
+```
+
+**Input**:
+- `./data/SEAAD_A9_RNAseq_DREAM_Cleaned.h5ad` (cleaned single-cell RNA-seq data)
+
+**Output**:
+- `./results/transformer/model.pt` (trained transformer weights)
+- `./results/transformer/results.yaml` (metrics: accuracy, F1, ROC-AUC)
+- `./results/transformer/train_logs.json` (training history)
+
+#### Step 3: Fine-tune scGPT (Optional)
+```bash
+accelerate launch --multi_gpu scripts/train_scgpt.py \
+    --data-path ./data/SEAAD_A9_RNAseq_DREAM_Cleaned.h5ad \
+    --cell-type Oligodendrocyte \
+    --precision bf16
+```
+
+**Input**:
+- `./data/SEAAD_A9_RNAseq_DREAM_Cleaned.h5ad` (cleaned single-cell RNA-seq data)
+
+**Output**:
+- `./results/scgpt/model.pt` (fine-tuned scGPT weights)
+- `./results/scgpt/results.yaml` (metrics: accuracy, F1, ROC-AUC)
+- `./results/scgpt/train_logs.json` (training history)
+
+#### Step 4: Compare All Models
+```bash
+python scripts/compare_models.py \
+    --results-dir ./results \
+    --output-dir ./results/comparison
+```
+
+**Input**:
+- `./results/mlp/results.yaml`
+- `./results/transformer/results.yaml`
+- `./results/scgpt/results.yaml` (if trained)
+
+**Output**:
+- `./results/comparison/comparison_table.csv` (side-by-side metrics)
+- `./results/comparison/comparison_plot.png` (visualization of metrics)
 
 ### Local Development
 
@@ -105,9 +159,45 @@ cd ADetective
 pip install -r requirements.txt
 ```
 
-3. **Download Data**: Get `SEAAD_A9_RNAseq_DREAM.2025-07-15.h5ad` from Synapse
+3. **Prepare Data**:
+```bash
+# Copy cleaned dataset
+cp /path/to/SEAAD_A9_RNAseq_DREAM_Cleaned.h5ad ./data/
+```
 
-4. **Run Pipeline**: See scripts in `scripts/` directory
+4. **Run Pipeline**:
+
+**MLP Training**:
+```bash
+accelerate launch --multi_gpu scripts/train_mlp.py \
+    --data-path ./data/SEAAD_A9_RNAseq_DREAM_Cleaned.h5ad \
+    --cell-type Oligodendrocyte \
+    --precision bf16
+```
+
+**Transformer Training**:
+```bash
+accelerate launch --multi_gpu scripts/train_transformer.py \
+    --data-path ./data/SEAAD_A9_RNAseq_DREAM_Cleaned.h5ad \
+    --cell-type Oligodendrocyte \
+    --use-flash-attn \
+    --precision bf16
+```
+
+**scGPT Fine-tuning**:
+```bash
+accelerate launch --multi_gpu scripts/train_scgpt.py \
+    --data-path ./data/SEAAD_A9_RNAseq_DREAM_Cleaned.h5ad \
+    --cell-type Oligodendrocyte \
+    --precision bf16
+```
+
+**Compare Models**:
+```bash
+python scripts/compare_models.py \
+    --results-dir ./results \
+    --output-dir ./results/comparison
+```
 
 ## Project Structure
 
@@ -199,6 +289,110 @@ If you use this code, please cite:
 ## License
 
 MIT License - see LICENSE file
+
+## Google Colab Troubleshooting
+
+### GPU Selection
+If you don't have GPU access:
+1. Go to `Runtime > Change runtime type`
+2. Select `GPU` (T4 or V100 preferred)
+3. Click `Save`
+
+### Memory Issues
+If you encounter out-of-memory errors:
+- **Reduce batch size**: Modify training scripts to use smaller batches
+- **Enable memory optimization**: Use `torch.cuda.empty_cache()` between training steps
+- **Reduce model size**: For Transformer, reduce `d_model` or number of layers
+
+### Package Installation Issues
+
+**Issue**: `pip install` hangs or times out
+```python
+# Solution: Install with retry and timeout
+!pip install --upgrade pip setuptools
+!pip install -q --no-cache-dir -r requirements-colab.txt
+```
+
+**Issue**: Conflicting package versions
+```python
+# Solution: Use Colab-optimized requirements which avoid conflicts
+!pip install -q -r requirements-colab.txt
+```
+
+**Issue**: ModuleNotFoundError for specific packages
+```python
+# Solution: Install missing packages individually
+!pip install -q anndata scanpy accelerate transformers
+```
+
+### Data Loading Issues
+
+**Issue**: `SEAAD_A9_RNAseq_DREAM_Cleaned.h5ad` not found
+```python
+# Solution 1: Verify file is in Google Drive
+import os
+if not os.path.exists('/content/drive/MyDrive/SEAAD_A9_RNAseq_DREAM_Cleaned.h5ad'):
+    print("File not found! Check your Google Drive path")
+
+# Solution 2: List available files
+!ls -lh /content/drive/MyDrive/ | grep SEAAD
+```
+
+**Issue**: Memory error when loading large H5AD file
+```python
+# Solution: Load with backed='r' to use memory mapping
+import anndata as ad
+adata = ad.read_h5ad('./data/SEAAD_A9_RNAseq_DREAM_Cleaned.h5ad', backed='r')
+```
+
+### Runtime Issues
+
+**Issue**: Session times out during training
+- **Solution**: Accelerate uses checkpointing - training will resume on reconnection
+- Save intermediate results frequently
+- Use shorter training epochs for testing
+
+**Issue**: CUDA out of memory during inference
+```python
+# Solution: Clear GPU cache and reduce batch size
+import torch
+torch.cuda.empty_cache()
+# Reduce batch_size in training config
+```
+
+### File I/O Best Practices
+
+**Recommended setup**:
+```python
+# Create local data directory
+!mkdir -p /content/data /content/results
+
+# Copy data once at the beginning
+!cp /content/drive/MyDrive/SEAAD_A9_RNAseq_DREAM_Cleaned.h5ad /content/data/
+
+# Work with local copy (faster I/O)
+# Save results back to Drive periodically
+!cp -r /content/results/* /content/drive/MyDrive/ADetective_Results/ 2>/dev/null || true
+```
+
+## Performance Tips for Colab
+
+1. **Use bf16 (bfloat16) precision**: Faster training, lower memory usage
+   - Already configured in training commands
+
+2. **Enable gradient checkpointing**: Trade compute for memory
+   - Implemented in Transformer model
+
+3. **Use mixed precision**: Combine fp16 and fp32
+   - Enabled via `accelerate` with `--precision bf16`
+
+4. **Batch size tuning**: Start small, increase gradually
+   - MLP: 32-64
+   - Transformer: 16-32
+   - scGPT: 8-16
+
+5. **Data loading optimization**: Use `pin_memory=True` for GPUs
+   - Already enabled in dataloaders
 
 ## Acknowledgments
 
