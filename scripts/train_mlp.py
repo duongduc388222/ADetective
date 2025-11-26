@@ -10,6 +10,7 @@ This script:
 5. Saves results and trained model
 """
 
+import argparse
 import json
 import logging
 import sys
@@ -23,7 +24,6 @@ import anndata as ad
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.utils.config import Config
 from src.models.mlp import MLPClassifier, MLPTrainer
 from src.eval.metrics import ModelEvaluator
 
@@ -32,6 +32,102 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+def parse_arguments():
+    """Parse command-line arguments for MLP training."""
+    parser = argparse.ArgumentParser(
+        description="Train MLP baseline model for oligodendrocyte AD classification",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Google Colab
+  python scripts/train_mlp.py \\
+    --data-dir ./results/processed \\
+    --output-dir ./results/mlp \\
+    --batch-size 32 --learning-rate 1e-3 --epochs 30
+
+  # With custom hyperparameters
+  python scripts/train_mlp.py \\
+    --data-dir ./results/processed \\
+    --output-dir ./results/mlp \\
+    --batch-size 16 --learning-rate 5e-4 \\
+    --hidden-dims 512 256 128
+        """,
+    )
+
+    parser.add_argument(
+        "--data-dir",
+        type=str,
+        required=True,
+        help="Directory with preprocessed data (train.h5ad, val.h5ad, test.h5ad)",
+    )
+
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="./results/mlp",
+        help="Directory to save results and checkpoint (default: ./results/mlp)",
+    )
+
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=32,
+        help="Batch size for training (default: 32)",
+    )
+
+    parser.add_argument(
+        "--learning-rate",
+        type=float,
+        default=1e-3,
+        help="Learning rate for AdamW optimizer (default: 1e-3)",
+    )
+
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=30,
+        help="Number of training epochs (default: 30)",
+    )
+
+    parser.add_argument(
+        "--weight-decay",
+        type=float,
+        default=1e-4,
+        help="Weight decay for regularization (default: 1e-4)",
+    )
+
+    parser.add_argument(
+        "--hidden-dims",
+        type=int,
+        nargs="+",
+        default=[512, 256, 128],
+        help="Hidden layer dimensions (default: 512 256 128)",
+    )
+
+    parser.add_argument(
+        "--dropout-rate",
+        type=float,
+        default=0.3,
+        help="Dropout rate (default: 0.3)",
+    )
+
+    parser.add_argument(
+        "--gradient-clip",
+        type=float,
+        default=1.0,
+        help="Gradient clipping value (default: 1.0)",
+    )
+
+    parser.add_argument(
+        "--patience",
+        type=int,
+        default=10,
+        help="Early stopping patience (default: 10)",
+    )
+
+    return parser.parse_args()
 
 
 def load_data(data_dir: Path) -> tuple:
@@ -106,18 +202,25 @@ def create_dataloaders(
 
 def main():
     """Train MLP model."""
+    args = parse_arguments()
+
     logger.info("=" * 80)
     logger.info("PHASE 3: MLP BASELINE TRAINING")
     logger.info("=" * 80)
 
-    # Configuration
-    config = Config(env="local")
-    data_dir = Path(config.get("output.results_dir")) / "processed"
-    output_dir = Path(config.get("output.results_dir")) / "mlp"
+    # Setup paths
+    data_dir = Path(args.data_dir)
+    output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info(f"\nData directory: {data_dir}")
     logger.info(f"Output directory: {output_dir}")
+    logger.info(f"Hyperparameters:")
+    logger.info(f"  Batch size: {args.batch_size}")
+    logger.info(f"  Learning rate: {args.learning_rate}")
+    logger.info(f"  Epochs: {args.epochs}")
+    logger.info(f"  Hidden dims: {args.hidden_dims}")
+    logger.info(f"  Dropout: {args.dropout_rate}")
 
     # Step 1: Load data
     logger.info("\n" + "=" * 80)
@@ -134,9 +237,8 @@ def main():
     logger.info("\n" + "=" * 80)
     logger.info("STEP 2: Creating Dataloaders")
     logger.info("=" * 80)
-    batch_size = config.get("training.batch_size", 32)
     train_loader, val_loader, test_loader = create_dataloaders(
-        X_train, y_train, X_val, y_val, X_test, y_test, batch_size=batch_size
+        X_train, y_train, X_val, y_val, X_test, y_test, batch_size=args.batch_size
     )
 
     # Step 3: Initialize model
@@ -144,14 +246,13 @@ def main():
     logger.info("STEP 3: Initializing MLP Model")
     logger.info("=" * 80)
     input_dim = X_train.shape[1]
-    hidden_dims = [512, 256, 128]
     output_dim = 2
 
     model = MLPClassifier(
         input_dim=input_dim,
-        hidden_dims=hidden_dims,
+        hidden_dims=args.hidden_dims,
         output_dim=output_dim,
-        dropout_rate=0.3,
+        dropout_rate=args.dropout_rate,
         batch_norm=True,
         activation="relu",
     )
@@ -165,12 +266,12 @@ def main():
 
     training_config = {
         "training": {
-            "learning_rate": config.get("training.learning_rate", 1e-3),
-            "weight_decay": 1e-4,
+            "learning_rate": args.learning_rate,
+            "weight_decay": args.weight_decay,
             "optimizer": "adamw",
-            "epochs": 30,
-            "gradient_clipping": 1.0,
-            "early_stopping": {"enabled": True, "patience": 10},
+            "epochs": args.epochs,
+            "gradient_clipping": args.gradient_clip,
+            "early_stopping": {"enabled": True, "patience": args.patience},
             "warmup": {"enabled": False},
         },
         "logging": {"log_frequency": 50},
@@ -185,7 +286,7 @@ def main():
     logger.info("\n" + "=" * 80)
     logger.info("STEP 5: Training Model")
     logger.info("=" * 80)
-    history = trainer.fit(train_loader, val_loader, num_epochs=30)
+    history = trainer.fit(train_loader, val_loader, num_epochs=args.epochs)
 
     # Save checkpoint
     checkpoint_path = output_dir / "checkpoint.pt"
@@ -210,9 +311,9 @@ def main():
     results = {
         "config": {
             "input_dim": input_dim,
-            "hidden_dims": hidden_dims,
+            "hidden_dims": args.hidden_dims,
             "output_dim": output_dim,
-            "batch_size": batch_size,
+            "batch_size": args.batch_size,
         },
         "training_history": {
             "train_loss": history["train_loss"],

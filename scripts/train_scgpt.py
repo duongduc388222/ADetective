@@ -11,6 +11,7 @@ This script:
 6. Saves results and trained model
 """
 
+import argparse
 import json
 import logging
 import sys
@@ -23,7 +24,6 @@ import anndata as ad
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.utils.config import Config
 from src.models.scgpt_wrapper import scGPTWrapper, scGPTFineTuner
 from src.eval.metrics import ModelEvaluator
 
@@ -376,16 +376,36 @@ class scGPTTrainer:
         return history
 
 
+def parse_arguments():
+    """Parse command-line arguments for scGPT fine-tuning."""
+    parser = argparse.ArgumentParser(description="Fine-tune scGPT foundation model for oligodendrocyte AD classification")
+    parser.add_argument("--data-dir", type=str, required=True, help="Directory with preprocessed data (train.h5ad, val.h5ad, test.h5ad)")
+    parser.add_argument("--output-dir", type=str, default="./results/scgpt", help="Directory to save results and checkpoint")
+    parser.add_argument("--batch-size", type=int, default=16, help="Batch size for training (default: 16)")
+    parser.add_argument("--learning-rate", type=float, default=1e-5, help="Learning rate for fine-tuning (default: 1e-5)")
+    parser.add_argument("--epochs", type=int, default=15, help="Number of training epochs (default: 15)")
+    parser.add_argument("--weight-decay", type=float, default=0.01, help="Weight decay for regularization (default: 0.01)")
+    parser.add_argument("--n-bins", type=int, default=51, help="Number of expression bins (default: 51)")
+    parser.add_argument("--d-model", type=int, default=512, help="Model dimension (default: 512)")
+    parser.add_argument("--nhead", type=int, default=8, help="Number of attention heads (default: 8)")
+    parser.add_argument("--num-layers", type=int, default=12, help="Number of transformer layers (default: 12)")
+    parser.add_argument("--freeze-layers", type=int, default=6, help="Number of layers to freeze (default: 6)")
+    parser.add_argument("--warmup-steps", type=int, default=500, help="Warmup steps for scheduler (default: 500)")
+    parser.add_argument("--patience", type=int, default=3, help="Early stopping patience (default: 3)")
+    return parser.parse_args()
+
+
 def main():
     """Fine-tune scGPT model."""
+    args = parse_arguments()
+
     logger.info("=" * 80)
     logger.info("PHASE 5: SCGPT FOUNDATION MODEL FINE-TUNING (WITH ACTUAL scGPT LIBRARY)")
     logger.info("=" * 80)
 
-    # Configuration
-    config = Config(env="local")
-    data_dir = Path(config.get("output.results_dir")) / "processed"
-    output_dir = Path(config.get("output.results_dir")) / "scgpt"
+    # Setup paths
+    data_dir = Path(args.data_dir)
+    output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info(f"\nData directory: {data_dir}")
@@ -412,11 +432,11 @@ def main():
             gene_names=gene_names,
             pretrained_path=None,  # No pretrained weights unless provided
             vocab_path=None,  # Create vocabulary from dataset genes
-            n_bins=51,
-            d_model=512,
-            nhead=8,
-            num_layers=12,
-            freeze_layers=6,  # Freeze bottom 6 of 12 layers
+            n_bins=args.n_bins,
+            d_model=args.d_model,
+            nhead=args.nhead,
+            num_layers=args.num_layers,
+            freeze_layers=args.freeze_layers,
             dropout=0.1,
             do_mvc=False,  # Disabled for classification fine-tuning
             do_dab=False,
@@ -435,13 +455,12 @@ def main():
     logger.info("\n" + "=" * 80)
     logger.info("STEP 3: Creating scGPT-format Dataloaders")
     logger.info("=" * 80)
-    batch_size = 16  # Smaller batch size for large model
     max_len = min(2048, X_train.shape[1])
 
     train_loader, val_loader, test_loader = create_dataloaders(
         X_train, y_train, X_val, y_val, X_test, y_test,
         gene_names, model,
-        batch_size=batch_size,
+        batch_size=args.batch_size,
         max_len=max_len,
     )
 
@@ -452,13 +471,13 @@ def main():
 
     finetuner = scGPTFineTuner(
         model=model,
-        learning_rate=1e-5,  # Very low LR for fine-tuning
-        warmup_steps=500,
-        weight_decay=0.01,
+        learning_rate=args.learning_rate,
+        warmup_steps=args.warmup_steps,
+        weight_decay=args.weight_decay,
     )
 
     # Create optimizer and scheduler
-    num_training_steps = len(X_train) // batch_size * 15
+    num_training_steps = len(X_train) // args.batch_size * args.epochs
     optimizer, scheduler = finetuner.create_optimizer_and_scheduler(num_training_steps)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -475,7 +494,7 @@ def main():
     logger.info("\n" + "=" * 80)
     logger.info("STEP 5: Fine-tuning Model")
     logger.info("=" * 80)
-    history = trainer.fit(train_loader, val_loader, num_epochs=15, patience=3)
+    history = trainer.fit(train_loader, val_loader, num_epochs=args.epochs, patience=args.patience)
 
     # Save checkpoint
     checkpoint_path = output_dir / "checkpoint.pt"
@@ -500,12 +519,12 @@ def main():
     results = {
         "config": {
             "num_genes": len(gene_names),
-            "n_bins": 51,
-            "d_model": 512,
-            "nhead": 8,
-            "num_layers": 12,
-            "freeze_layers": 6,
-            "batch_size": batch_size,
+            "n_bins": args.n_bins,
+            "d_model": args.d_model,
+            "nhead": args.nhead,
+            "num_layers": args.num_layers,
+            "freeze_layers": args.freeze_layers,
+            "batch_size": args.batch_size,
             "max_sequence_length": max_len,
             "model_type": "scGPT (actual library)",
         },

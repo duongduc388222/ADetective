@@ -10,13 +10,13 @@ This script handles:
 5. Saving preprocessed datasets
 """
 
+import argparse
 import logging
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.utils.config import Config
 from src.data.loaders import SEAADDataLoader
 
 logging.basicConfig(
@@ -26,20 +26,95 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def parse_arguments():
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Load, explore, and preprocess SEAAD dataset for training",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Local usage
+  python scripts/load.py \\
+    --data-path ./data/SEAAD_A9_RNAseq_DREAM.Cleaned.h5ad \\
+    --output-dir ./results
+
+  # Google Colab
+  python scripts/load.py \\
+    --data-path /content/SEAAD_A9_RNAseq_DREAM.Cleaned.h5ad \\
+    --output-dir ./results \\
+    --n-hvgs 2000
+        """,
+    )
+
+    parser.add_argument(
+        "--data-path",
+        type=str,
+        required=True,
+        help="Path to the SEAAD H5AD file (e.g., /content/SEAAD_A9_RNAseq_DREAM.Cleaned.h5ad)",
+    )
+
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="./results",
+        help="Directory to save processed data (default: ./results)",
+    )
+
+    parser.add_argument(
+        "--train-ratio",
+        type=float,
+        default=0.7,
+        help="Fraction of donors for training set (default: 0.7)",
+    )
+
+    parser.add_argument(
+        "--val-ratio",
+        type=float,
+        default=0.1,
+        help="Fraction of donors for validation set (default: 0.1)",
+    )
+
+    parser.add_argument(
+        "--test-ratio",
+        type=float,
+        default=0.2,
+        help="Fraction of donors for test set (default: 0.2)",
+    )
+
+    parser.add_argument(
+        "--n-hvgs",
+        type=int,
+        default=2000,
+        help="Number of highly variable genes to select (default: 2000)",
+    )
+
+    return parser.parse_args()
+
+
 def main():
     """Load and preprocess cleaned dataset."""
+    args = parse_arguments()
+
+    # Validate split ratios
+    if not (abs(args.train_ratio + args.val_ratio + args.test_ratio - 1.0) < 0.01):
+        logger.error(
+            f"Split ratios must sum to 1.0, got {args.train_ratio + args.val_ratio + args.test_ratio}"
+        )
+        return False
+
     logger.info("=" * 80)
     logger.info("PHASE 2: DATA LOADING AND PREPROCESSING")
     logger.info("=" * 80)
 
-    # Load configuration
-    config = Config(env="local")
-    data_path = config.get("data.path")
-    output_dir = Path(config.get("output.results_dir")) / "processed"
+    # Setup paths
+    data_path = args.data_path
+    output_dir = Path(args.output_dir) / "processed"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info(f"\nData path: {data_path}")
     logger.info(f"Output directory: {output_dir}")
+    logger.info(f"Train/Val/Test split: {args.train_ratio}/{args.val_ratio}/{args.test_ratio}")
+    logger.info(f"Number of HVGs: {args.n_hvgs}")
 
     # Initialize data loader
     try:
@@ -106,9 +181,9 @@ def main():
     logger.info("=" * 80)
     try:
         train_data, val_data, test_data = loader.stratified_split(
-            train_ratio=0.7,
-            val_ratio=0.1,
-            test_ratio=0.2,
+            train_ratio=args.train_ratio,
+            val_ratio=args.val_ratio,
+            test_ratio=args.test_ratio,
         )
     except Exception as e:
         logger.error(f"Failed to create splits: {e}")
@@ -118,11 +193,10 @@ def main():
     logger.info("\n" + "=" * 80)
     logger.info("STEP 7: Selecting Highly Variable Genes")
     logger.info("=" * 80)
-    n_hvgs = 2000
     try:
-        train_data = loader.select_hvgs(train_data, n_hvgs)
-        val_data = loader.select_hvgs(val_data, n_hvgs)
-        test_data = loader.select_hvgs(test_data, n_hvgs)
+        train_data = loader.select_hvgs(train_data, args.n_hvgs)
+        val_data = loader.select_hvgs(val_data, args.n_hvgs)
+        test_data = loader.select_hvgs(test_data, args.n_hvgs)
     except Exception as e:
         logger.warning(f"Could not select HVGs: {e}")
 

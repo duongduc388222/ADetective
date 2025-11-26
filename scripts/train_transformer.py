@@ -10,6 +10,7 @@ This script:
 5. Saves results and trained model
 """
 
+import argparse
 import json
 import logging
 import sys
@@ -22,7 +23,6 @@ import anndata as ad
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.utils.config import Config
 from src.models.transformer import FlashTransformer, TransformerTrainer
 from src.eval.metrics import ModelEvaluator
 
@@ -133,16 +133,35 @@ def check_flash_attention():
     logger.info("=" * 30)
 
 
+def parse_arguments():
+    """Parse command-line arguments for Transformer training."""
+    parser = argparse.ArgumentParser(description="Train Transformer model for oligodendrocyte AD classification")
+    parser.add_argument("--data-dir", type=str, required=True, help="Directory with preprocessed data (train.h5ad, val.h5ad, test.h5ad)")
+    parser.add_argument("--output-dir", type=str, default="./results/transformer", help="Directory to save results and checkpoint")
+    parser.add_argument("--batch-size", type=int, default=32, help="Batch size for training (default: 32)")
+    parser.add_argument("--learning-rate", type=float, default=1e-4, help="Learning rate for AdamW optimizer (default: 1e-4)")
+    parser.add_argument("--epochs", type=int, default=30, help="Number of training epochs (default: 30)")
+    parser.add_argument("--weight-decay", type=float, default=1e-4, help="Weight decay for regularization (default: 1e-4)")
+    parser.add_argument("--d-model", type=int, default=128, help="Model dimension (default: 128)")
+    parser.add_argument("--nhead", type=int, default=8, help="Number of attention heads (default: 8)")
+    parser.add_argument("--num-layers", type=int, default=3, help="Number of transformer layers (default: 3)")
+    parser.add_argument("--dim-feedforward", type=int, default=256, help="FFN dimension (default: 256)")
+    parser.add_argument("--dropout", type=float, default=0.1, help="Dropout rate (default: 0.1)")
+    parser.add_argument("--gradient-clip", type=float, default=1.0, help="Gradient clipping value (default: 1.0)")
+    parser.add_argument("--patience", type=int, default=10, help="Early stopping patience (default: 10)")
+    parser.add_argument("--expression-scaling", type=str, default="multiplicative", choices=["multiplicative", "additive", "concatenate"], help="Expression scaling method")
+    return parser.parse_args()
+
+
 def main():
     """Train Transformer model."""
+    args = parse_arguments()
     logger.info("=" * 80)
     logger.info("PHASE 4: TRANSFORMER TRAINING")
     logger.info("=" * 80)
 
-    # Configuration
-    config = Config(env="local")
-    data_dir = Path(config.get("output.results_dir")) / "processed"
-    output_dir = Path(config.get("output.results_dir")) / "transformer"
+    data_dir = Path(args.data_dir)
+    output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info(f"\nData directory: {data_dir}")
@@ -169,9 +188,8 @@ def main():
     logger.info("\n" + "=" * 80)
     logger.info("STEP 2: Creating Dataloaders")
     logger.info("=" * 80)
-    batch_size = config.get("training.batch_size", 32)
     train_loader, val_loader, test_loader = create_dataloaders(
-        X_train, y_train, X_val, y_val, X_test, y_test, batch_size=batch_size
+        X_train, y_train, X_val, y_val, X_test, y_test, batch_size=args.batch_size
     )
 
     # Step 3: Initialize model
@@ -182,14 +200,14 @@ def main():
 
     model = FlashTransformer(
         num_genes=num_genes,
-        d_model=128,
-        nhead=8,
-        num_layers=3,
-        dim_feedforward=256,
-        dropout=0.1,
+        d_model=args.d_model,
+        nhead=args.nhead,
+        num_layers=args.num_layers,
+        dim_feedforward=args.dim_feedforward,
+        dropout=args.dropout,
         max_seq_length=min(num_genes + 1, 2048),  # +1 for CLS token
         use_cls_token=True,
-        expression_scaling='multiplicative',
+        expression_scaling=args.expression_scaling,
     )
 
     logger.info(f"Model created with {sum(p.numel() for p in model.parameters()):,} parameters")
@@ -201,12 +219,12 @@ def main():
 
     training_config = {
         "training": {
-            "learning_rate": config.get("training.learning_rate", 1e-4),
-            "weight_decay": 1e-4,
+            "learning_rate": args.learning_rate,
+            "weight_decay": args.weight_decay,
             "optimizer": "adamw",
-            "epochs": 30,
-            "gradient_clipping": 1.0,
-            "early_stopping": {"enabled": True, "patience": 10},
+            "epochs": args.epochs,
+            "gradient_clipping": args.gradient_clip,
+            "early_stopping": {"enabled": True, "patience": args.patience},
             "warmup": {"enabled": False},
         },
         "logging": {"log_frequency": 50},
@@ -221,7 +239,7 @@ def main():
     logger.info("\n" + "=" * 80)
     logger.info("STEP 5: Training Model")
     logger.info("=" * 80)
-    history = trainer.fit(train_loader, val_loader, num_epochs=30)
+    history = trainer.fit(train_loader, val_loader, num_epochs=args.epochs)
 
     # Save checkpoint
     checkpoint_path = output_dir / "checkpoint.pt"
@@ -246,11 +264,11 @@ def main():
     results = {
         "config": {
             "num_genes": num_genes,
-            "d_model": 128,
-            "nhead": 8,
-            "num_layers": 3,
-            "dim_feedforward": 256,
-            "batch_size": batch_size,
+            "d_model": args.d_model,
+            "nhead": args.nhead,
+            "num_layers": args.num_layers,
+            "dim_feedforward": args.dim_feedforward,
+            "batch_size": args.batch_size,
         },
         "training_history": {
             "train_loss": history["train_loss"],
