@@ -26,7 +26,7 @@ class SEAADDataLoader:
         Initialize SEAAD data loader.
 
         Args:
-            data_path: Path to SEAAD_A9_RNAseq_DREAM.2025-07-15.h5ad file
+            data_path: Path to SEAAD_A9_RNAseq_DREAM_Cleaned.h5ad file
             cache_processed: Whether to cache processed data
             cell_type_column: Column name for cell type (default: "Subclass" - fine-grained)
             donor_column: Column name for donor ID (default: "Donor ID")
@@ -149,7 +149,7 @@ class SEAADDataLoader:
         logger.info("🔍 Filtering... (loading filtered subset into memory)")
         adata_filtered = self.adata[
             self.adata.obs[self.cell_type_column].str.lower() == cell_type.lower()
-        ].copy()
+        ].to_memory()
 
         logger.info(f"Cells before filtering: {before_count:,}")
         logger.info(f"Cells after filtering:  {adata_filtered.n_obs:,}")
@@ -195,7 +195,7 @@ class SEAADDataLoader:
         # Filter out excluded categories (loads filtered subset into memory)
         logger.info("🔍 Filtering by ADNC status... (loading filtered subset into memory)")
         mask = ~self.adata.obs[self.adnc_column].isin(exclude_categories)
-        adata_filtered = self.adata[mask].copy()
+        adata_filtered = self.adata[mask].to_memory()
 
         logger.info(f"Cells retained: {adata_filtered.n_obs:,} / {self.adata.n_obs:,}")
         logger.info(f"✓ Filtered subset loaded")
@@ -301,9 +301,9 @@ class SEAADDataLoader:
         logger.info("🔍 Creating train/val/test splits and loading into memory...")
         train_adata = self.adata[
             self.adata.obs[self.donor_column].isin(donors_train)
-        ].copy()
-        val_adata = self.adata[self.adata.obs[self.donor_column].isin(donors_val)].copy()
-        test_adata = self.adata[self.adata.obs[self.donor_column].isin(donors_test)].copy()
+        ].to_memory()
+        val_adata = self.adata[self.adata.obs[self.donor_column].isin(donors_val)].to_memory()
+        test_adata = self.adata[self.adata.obs[self.donor_column].isin(donors_test)].to_memory()
 
         logger.info(f"Train set: {train_adata.n_obs:,} cells from {donors_train.nunique()} donors")
         logger.info(f"Val set:   {val_adata.n_obs:,} cells from {donors_val.nunique()} donors")
@@ -349,7 +349,7 @@ class SEAADDataLoader:
 
         # Select HVGs and load into memory
         logger.info(f"🔍 Selecting {n_hvgs} HVGs and loading into memory...")
-        adata_hvg = adata[:, adata.var.highly_variable].copy()
+        adata_hvg = adata[:, adata.var.highly_variable].to_memory()
         logger.info(f"✓ Selected {adata_hvg.n_vars:,} highly variable genes and loaded into memory")
 
         return adata_hvg

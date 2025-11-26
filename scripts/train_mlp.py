@@ -36,97 +36,17 @@ logger = logging.getLogger(__name__)
 
 def parse_arguments():
     """Parse command-line arguments for MLP training."""
-    parser = argparse.ArgumentParser(
-        description="Train MLP baseline model for oligodendrocyte AD classification",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Google Colab
-  python scripts/train_mlp.py \\
-    --data-dir ./results/processed \\
-    --output-dir ./results/mlp \\
-    --batch-size 32 --learning-rate 1e-3 --epochs 30
-
-  # With custom hyperparameters
-  python scripts/train_mlp.py \\
-    --data-dir ./results/processed \\
-    --output-dir ./results/mlp \\
-    --batch-size 16 --learning-rate 5e-4 \\
-    --hidden-dims 512 256 128
-        """,
-    )
-
-    parser.add_argument(
-        "--data-dir",
-        type=str,
-        required=True,
-        help="Directory with preprocessed data (train.h5ad, val.h5ad, test.h5ad)",
-    )
-
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        default="./results/mlp",
-        help="Directory to save results and checkpoint (default: ./results/mlp)",
-    )
-
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=32,
-        help="Batch size for training (default: 32)",
-    )
-
-    parser.add_argument(
-        "--learning-rate",
-        type=float,
-        default=1e-3,
-        help="Learning rate for AdamW optimizer (default: 1e-3)",
-    )
-
-    parser.add_argument(
-        "--epochs",
-        type=int,
-        default=30,
-        help="Number of training epochs (default: 30)",
-    )
-
-    parser.add_argument(
-        "--weight-decay",
-        type=float,
-        default=1e-4,
-        help="Weight decay for regularization (default: 1e-4)",
-    )
-
-    parser.add_argument(
-        "--hidden-dims",
-        type=int,
-        nargs="+",
-        default=[512, 256, 128],
-        help="Hidden layer dimensions (default: 512 256 128)",
-    )
-
-    parser.add_argument(
-        "--dropout-rate",
-        type=float,
-        default=0.3,
-        help="Dropout rate (default: 0.3)",
-    )
-
-    parser.add_argument(
-        "--gradient-clip",
-        type=float,
-        default=1.0,
-        help="Gradient clipping value (default: 1.0)",
-    )
-
-    parser.add_argument(
-        "--patience",
-        type=int,
-        default=10,
-        help="Early stopping patience (default: 10)",
-    )
-
+    parser = argparse.ArgumentParser(description="Train MLP baseline model for oligodendrocyte AD classification")
+    parser.add_argument("--data-dir", type=str, required=True, help="Directory with preprocessed data (train.h5ad, val.h5ad, test.h5ad)")
+    parser.add_argument("--output-dir", type=str, default="./results/mlp", help="Directory to save results and checkpoint (default: ./results/mlp)")
+    parser.add_argument("--batch-size", type=int, default=32, help="Batch size for training (default: 32)")
+    parser.add_argument("--learning-rate", type=float, default=1e-3, help="Learning rate for AdamW optimizer (default: 1e-3)")
+    parser.add_argument("--epochs", type=int, default=30, help="Number of training epochs (default: 30)")
+    parser.add_argument("--weight-decay", type=float, default=1e-4, help="Weight decay for regularization (default: 1e-4)")
+    parser.add_argument("--hidden-dims", type=int, nargs="+", default=[512, 256, 128], help="Hidden layer dimensions (default: 512 256 128)")
+    parser.add_argument("--dropout-rate", type=float, default=0.3, help="Dropout rate (default: 0.3)")
+    parser.add_argument("--gradient-clip", type=float, default=1.0, help="Gradient clipping value (default: 1.0)")
+    parser.add_argument("--patience", type=int, default=10, help="Early stopping patience (default: 10)")
     return parser.parse_args()
 
 

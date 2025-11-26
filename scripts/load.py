@@ -35,12 +35,12 @@ def parse_arguments():
 Examples:
   # Local usage
   python scripts/load.py \\
-    --data-path ./data/SEAAD_A9_RNAseq_DREAM.Cleaned.h5ad \\
+    --data-path ./data/SEAAD_A9_RNAseq_DREAM_Cleaned.h5ad \\
     --output-dir ./results
 
   # Google Colab
   python scripts/load.py \\
-    --data-path /content/SEAAD_A9_RNAseq_DREAM.Cleaned.h5ad \\
+    --data-path /content/SEAAD_A9_RNAseq_DREAM_Cleaned.h5ad \\
     --output-dir ./results \\
     --n-hvgs 2000
         """,
@@ -50,7 +50,7 @@ Examples:
         "--data-path",
         type=str,
         required=True,
-        help="Path to the SEAAD H5AD file (e.g., /content/SEAAD_A9_RNAseq_DREAM.Cleaned.h5ad)",
+        help="Path to the SEAAD H5AD file (e.g., /content/SEAAD_A9_RNAseq_DREAM_Cleaned.h5ad)",
     )
 
     parser.add_argument(
