@@ -47,6 +47,8 @@ def parse_arguments():
     parser.add_argument("--dropout-rate", type=float, default=0.3, help="Dropout rate (default: 0.3)")
     parser.add_argument("--gradient-clip", type=float, default=1.0, help="Gradient clipping value (default: 1.0)")
     parser.add_argument("--patience", type=int, default=10, help="Early stopping patience (default: 10)")
+    parser.add_argument("--use-accelerate", action="store_true", default=True, help="Use Accelerate for distributed training (default: True)")
+    parser.add_argument("--no-accelerate", dest="use_accelerate", action="store_false", help="Disable Accelerate and use single GPU/CPU")
     return parser.parse_args()
 
 
@@ -199,8 +201,14 @@ def main():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     logger.info(f"Using device: {device}")
+    logger.info(f"Using Accelerate: {args.use_accelerate}")
 
-    trainer = MLPTrainer(model, config=training_config, device=device)
+    trainer = MLPTrainer(
+        model,
+        config=training_config,
+        device=device,
+        use_accelerate=args.use_accelerate,
+    )
 
     # Step 5: Train model
     logger.info("\n" + "=" * 80)
@@ -208,16 +216,22 @@ def main():
     logger.info("=" * 80)
     history = trainer.fit(train_loader, val_loader, num_epochs=args.epochs)
 
-    # Save checkpoint
+    # Save checkpoint (unwrap model if using Accelerate)
     checkpoint_path = output_dir / "checkpoint.pt"
-    torch.save(model.state_dict(), checkpoint_path)
+    if args.use_accelerate:
+        model_to_save = trainer.accelerator.unwrap_model(trainer.model)
+    else:
+        model_to_save = model
+    torch.save(model_to_save.state_dict(), checkpoint_path)
     logger.info(f"Saved model checkpoint to {checkpoint_path}")
 
     # Step 6: Evaluate on test set
     logger.info("\n" + "=" * 80)
     logger.info("STEP 6: Test Set Evaluation")
     logger.info("=" * 80)
-    evaluator = ModelEvaluator(model, device=device)
+    # Use unwrapped model for evaluation
+    eval_model = model_to_save
+    evaluator = ModelEvaluator(eval_model, device=device)
     test_metrics = evaluator.evaluate(test_loader, dataset_name="test")
 
     # Classification report

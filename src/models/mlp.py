@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LinearLR
+from accelerate import Accelerator
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +141,7 @@ class MLPTrainer:
         model: nn.Module,
         config: Dict,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
+        use_accelerate: bool = True,
     ):
         """
         Initialize trainer.
@@ -147,22 +149,38 @@ class MLPTrainer:
         Args:
             model: Model to train
             config: Configuration dictionary (from YAML)
-            device: Device to use ("cuda" or "cpu")
+            device: Device to use ("cuda" or "cpu") - used if use_accelerate=False
+            use_accelerate: Whether to use Accelerate library (default: True)
         """
         self.model = model
         self.config = config
-        self.device = device
+        self.use_accelerate = use_accelerate
 
-        logger.info(f"Initializing MLPTrainer on device: {device}")
+        # Initialize Accelerator
+        if self.use_accelerate:
+            self.accelerator = Accelerator()
+            logger.info(f"Initializing MLPTrainer with Accelerate")
+            logger.info(f"  Device: {self.accelerator.device}")
+            logger.info(f"  Process index: {self.accelerator.process_index}")
+            logger.info(f"  Number of processes: {self.accelerator.num_processes}")
+        else:
+            self.accelerator = None
+            self.device = device
+            logger.info(f"Initializing MLPTrainer on device: {device}")
+            self.model = self.model.to(device)
 
-        # Move model to device
-        self.model = self.model.to(device)
-
-        # Create optimizer
+        # Create optimizer (before prepare)
         self.optimizer = self._create_optimizer()
 
         # Create learning rate scheduler
         self.scheduler = self._create_scheduler()
+
+        # Prepare model, optimizer, and scheduler with Accelerate
+        if self.use_accelerate:
+            self.model, self.optimizer, self.scheduler = self.accelerator.prepare(
+                self.model, self.optimizer, self.scheduler
+            )
+            logger.info("Model, optimizer, and scheduler prepared with Accelerate")
 
         # Loss function
         self.criterion = nn.CrossEntropyLoss()
@@ -229,21 +247,29 @@ class MLPTrainer:
         num_batches = 0
 
         for batch_idx, (X, y) in enumerate(train_loader):
-            X = X.to(self.device)
-            y = y.to(self.device)
+            # No need to move to device with Accelerate - it handles this
+            if not self.use_accelerate:
+                X = X.to(self.device)
+                y = y.to(self.device)
 
             # Forward pass
             self.optimizer.zero_grad()
             logits = self.model(X)
             loss = self.criterion(logits, y)
 
-            # Backward pass
-            loss.backward()
+            # Backward pass with Accelerate
+            if self.use_accelerate:
+                self.accelerator.backward(loss)
+            else:
+                loss.backward()
 
             # Gradient clipping
             grad_clip = self.config["training"].get("gradient_clipping")
             if grad_clip:
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip)
+                if self.use_accelerate:
+                    self.accelerator.clip_grad_norm_(self.model.parameters(), grad_clip)
+                else:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip)
 
             # Optimizer step
             self.optimizer.step()
@@ -262,12 +288,13 @@ class MLPTrainer:
             num_batches += 1
             self.global_step += 1
 
-            # Logging
+            # Logging (only on main process when using Accelerate)
             if (batch_idx + 1) % self.config["logging"].get("log_frequency", 100) == 0:
-                logger.info(
-                    f"Epoch {epoch} | Batch {batch_idx + 1}/{len(train_loader)} | "
-                    f"Loss: {loss.item():.4f} | Acc: {accuracy.item():.4f}"
-                )
+                if not self.use_accelerate or self.accelerator.is_main_process:
+                    logger.info(
+                        f"Epoch {epoch} | Batch {batch_idx + 1}/{len(train_loader)} | "
+                        f"Loss: {loss.item():.4f} | Acc: {accuracy.item():.4f}"
+                    )
 
         avg_loss = total_loss / num_batches
         avg_accuracy = total_accuracy / num_batches
@@ -291,8 +318,10 @@ class MLPTrainer:
 
         with torch.no_grad():
             for X, y in val_loader:
-                X = X.to(self.device)
-                y = y.to(self.device)
+                # No need to move to device with Accelerate - it handles this
+                if not self.use_accelerate:
+                    X = X.to(self.device)
+                    y = y.to(self.device)
 
                 logits = self.model(X)
                 loss = self.criterion(logits, y)
@@ -339,10 +368,11 @@ class MLPTrainer:
         early_stop_enabled = early_stop_config.get("enabled", True)
         patience = early_stop_config.get("patience", 15)
 
-        logger.info(
-            f"Starting training: {num_epochs} epochs, "
-            f"early stopping={early_stop_enabled} (patience={patience})"
-        )
+        if not self.use_accelerate or self.accelerator.is_main_process:
+            logger.info(
+                f"Starting training: {num_epochs} epochs, "
+                f"early stopping={early_stop_enabled} (patience={patience})"
+            )
 
         for epoch in range(num_epochs):
             # Train
@@ -355,23 +385,26 @@ class MLPTrainer:
             history["val_loss"].append(val_loss)
             history["val_accuracy"].append(val_acc)
 
-            logger.info(
-                f"Epoch {epoch:3d} | Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | "
-                f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f}"
-            )
+            if not self.use_accelerate or self.accelerator.is_main_process:
+                logger.info(
+                    f"Epoch {epoch:3d} | Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | "
+                    f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f}"
+                )
 
             # Early stopping
             if early_stop_enabled:
                 if val_loss < self.best_val_loss:
                     self.best_val_loss = val_loss
                     self.patience_counter = 0
-                    logger.info(f"  → New best validation loss: {val_loss:.4f}")
+                    if not self.use_accelerate or self.accelerator.is_main_process:
+                        logger.info(f"  → New best validation loss: {val_loss:.4f}")
                 else:
                     self.patience_counter += 1
                     if self.patience_counter >= patience:
-                        logger.info(
-                            f"Early stopping triggered (patience {patience} reached)"
-                        )
+                        if not self.use_accelerate or self.accelerator.is_main_process:
+                            logger.info(
+                                f"Early stopping triggered (patience {patience} reached)"
+                            )
                         break
 
         return history

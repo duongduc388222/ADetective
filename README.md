@@ -11,6 +11,7 @@ Binary classification of Alzheimer's Disease neuropathology (High vs Not AD) usi
 - [Data Processing](#data-processing)
 - [Model Details](#model-details)
 - [Google Colab Guide](#google-colab-guide)
+  - [Accelerate Integration](#accelerate-integration-colab-support)
 
 ## Overview
 
@@ -475,17 +476,231 @@ drive.mount('/content/drive')
 ```
 
 **Cell 4: Train All Models** (can be run as separate cells)
+
+All training scripts now support **Hugging Face Accelerate** by default. See the [Accelerate Integration](#accelerate-integration-colab-support) section below.
+
 ```bash
-# MLP - Quick baseline
-!accelerate launch --multi_gpu scripts/train_mlp.py \
-    --data-path ./data/SEAAD_A9_RNAseq_DREAM_Cleaned.h5ad \
-    --cell-type Oligodendrocyte --precision bf16
+# MLP - Quick baseline (uses Accelerate automatically)
+python scripts/train_mlp.py \
+    --data-dir ./results/processed \
+    --output-dir ./results/mlp \
+    --batch-size 32 --learning-rate 1e-3 --epochs 30
+
+# Or with explicit accelerate launch for single GPU
+accelerate launch scripts/train_mlp.py \
+    --data-dir ./results/processed \
+    --output-dir ./results/mlp \
+    --batch-size 32 --learning-rate 1e-3 --epochs 30
 ```
 
 **Cell 5: Save Results**
 ```bash
 !cp -r ./results /content/drive/MyDrive/ADetective_Results_$(date +%Y%m%d)
 ```
+
+### Accelerate Integration (Colab Support)
+
+All three training scripts have been integrated with **Hugging Face Accelerate** library for distributed training support.
+
+#### What is Accelerate?
+
+Accelerate is a library that:
+- Handles device placement automatically (GPU/CPU/multi-GPU)
+- Supports mixed precision training (fp16/bf16)
+- Simplifies distributed training code
+- Works seamlessly with Colab, local GPUs, and multi-GPU setups
+
+#### Running on Colab (Single GPU)
+
+**Option 1: Default (Recommended)**
+```bash
+python scripts/train_mlp.py \
+    --data-dir ./results/processed \
+    --output-dir ./results/mlp \
+    --batch-size 32 --learning-rate 1e-3 --epochs 30
+```
+- Uses Accelerate automatically with default settings
+- Accelerate auto-detects 1 GPU and configures optimally
+
+**Option 2: With Explicit Accelerate Launch**
+```bash
+accelerate launch scripts/train_mlp.py \
+    --data-dir ./results/processed \
+    --output-dir ./results/mlp \
+    --batch-size 32 --learning-rate 1e-3 --epochs 30
+```
+- More explicit control
+- Better for debugging
+
+**Option 3: Disable Accelerate (Fall Back to Single GPU)**
+```bash
+python scripts/train_mlp.py \
+    --data-dir ./results/processed \
+    --output-dir ./results/mlp \
+    --batch-size 32 --learning-rate 1e-3 --epochs 30 \
+    --no-accelerate
+```
+
+#### Command-Line Flags
+
+All training scripts support Accelerate control:
+
+```bash
+# Enable Accelerate (default)
+--use-accelerate          # Explicitly enable (default is True)
+
+# Disable Accelerate
+--no-accelerate           # Use single GPU without Accelerate wrapper
+```
+
+#### Training Scripts with Accelerate Support
+
+**1. MLP Training (train_mlp.py)**
+```bash
+python scripts/train_mlp.py \
+    --data-dir ./results/processed \
+    --output-dir ./results/mlp \
+    --batch-size 32 \
+    --learning-rate 1e-3 \
+    --epochs 30 \
+    --hidden-dims 512 256 128 \
+    --dropout-rate 0.3 \
+    --gradient-clip 1.0 \
+    --patience 10
+```
+
+**2. Transformer Training (train_transformer.py)**
+```bash
+python scripts/train_transformer.py \
+    --data-dir ./results/processed \
+    --output-dir ./results/transformer \
+    --batch-size 32 \
+    --learning-rate 1e-4 \
+    --epochs 30 \
+    --d-model 128 \
+    --nhead 8 \
+    --num-layers 3 \
+    --dim-feedforward 256 \
+    --dropout 0.1 \
+    --gradient-clip 1.0 \
+    --patience 10
+```
+
+**3. scGPT Fine-tuning (train_scgpt.py)**
+```bash
+python scripts/train_scgpt.py \
+    --data-dir ./results/processed \
+    --output-dir ./results/scgpt \
+    --batch-size 16 \
+    --learning-rate 1e-5 \
+    --epochs 15 \
+    --n-bins 51 \
+    --d-model 512 \
+    --nhead 8 \
+    --num-layers 12 \
+    --freeze-layers 6 \
+    --warmup-steps 500 \
+    --patience 3
+```
+
+#### Accelerate Features Used
+
+- **Mixed Precision Training**: Automatic fp16/bf16 support
+- **Gradient Clipping**: Safer training with `accelerator.clip_grad_norm_()`
+- **Backward Pass**: Unified `accelerator.backward()` method
+- **Device Management**: Automatic device placement (no manual `.to(device)` needed in dataloader)
+- **Model Wrapping**: Proper model unwrapping for checkpointing and inference
+
+#### Example: Complete Colab Workflow with Accelerate
+
+```python
+# Cell 1: Setup
+!git clone https://github.com/[username]/ADetective.git
+%cd ADetective
+!pip install -q -r requirements-colab.txt
+
+# Cell 2: Mount and copy data
+from google.colab import drive
+drive.mount('/content/drive')
+!mkdir -p ./results/processed
+!cp /content/drive/MyDrive/SEAAD_A9_RNAseq_DREAM_Cleaned.h5ad ./data/
+
+# Cell 3: Preprocess (one-time)
+!python scripts/prepare_data.py \
+    --input-path ./data/SEAAD_A9_RNAseq_DREAM_Cleaned.h5ad \
+    --output-path ./results/processed \
+    --cell-type Oligodendrocyte
+
+# Cell 4: Train MLP with Accelerate
+!python scripts/train_mlp.py \
+    --data-dir ./results/processed \
+    --output-dir ./results/mlp \
+    --batch-size 32 \
+    --learning-rate 1e-3 \
+    --epochs 30
+
+# Cell 5: Train Transformer with Accelerate
+!python scripts/train_transformer.py \
+    --data-dir ./results/processed \
+    --output-dir ./results/transformer \
+    --batch-size 32 \
+    --learning-rate 1e-4 \
+    --epochs 30
+
+# Cell 6: Fine-tune scGPT with Accelerate
+!python scripts/train_scgpt.py \
+    --data-dir ./results/processed \
+    --output-dir ./results/scgpt \
+    --batch-size 16 \
+    --learning-rate 1e-5 \
+    --epochs 15
+
+# Cell 7: Save to Drive
+!cp -r ./results /content/drive/MyDrive/ADetective_Results_$(date +%Y%m%d)
+```
+
+#### Accelerate Configuration
+
+For advanced users, Accelerate can be configured via:
+
+1. **Environment Variables**:
+   ```bash
+   export ACCELERATE_GPU_PER_DEVICE=1
+   export ACCELERATE_MIXED_PRECISION=bf16
+   python scripts/train_mlp.py --data-dir ...
+   ```
+
+2. **Accelerate Config File** (optional):
+   ```bash
+   accelerate config
+   # Answers questions about your setup
+   # Creates ~/.huggingface/accelerate/default_config.yaml
+   ```
+
+3. **Command-line Flags**:
+   ```bash
+   accelerate launch \
+       --num_processes 1 \
+       --mixed_precision bf16 \
+       scripts/train_mlp.py --data-dir ...
+   ```
+
+#### Troubleshooting Accelerate Issues
+
+**Issue: "RuntimeError: Expected all tensors to be on the same device"**
+- Solution: Ensure you're not manually moving tensors with `.to(device)` when using Accelerate
+- Accelerate handles device placement automatically
+- If needed, disable: `python scripts/train_mlp.py --no-accelerate`
+
+**Issue: "CUDA out of memory"**
+- Accelerate uses same memory as non-distributed training
+- Reduce batch size: `--batch-size 16` instead of 32
+- Or disable mixed precision if needed
+
+**Issue: Slower training than expected**
+- Accelerate adds minimal overhead (~2-3%)
+- On single GPU, performance should be equivalent
+- If significantly slower, check if GPU is actually being used: `!nvidia-smi`
 
 ### Troubleshooting
 
@@ -613,9 +828,10 @@ See `requirements.txt` for full list.
 - ✅ Three complementary model architectures
 - ✅ Mixed precision training (bf16)
 - ✅ Flash Attention optimization (PyTorch 2.0)
+- ✅ Hugging Face Accelerate integration (distributed training)
 - ✅ Comprehensive metrics and visualization
 - ✅ Reproducible with fixed seeds
-- ✅ Google Colab compatible
+- ✅ Google Colab compatible (single & multi-GPU)
 - ✅ Modular, extensible design
 
 ## Citation

@@ -21,6 +21,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 import anndata as ad
+from accelerate import Accelerator
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -232,12 +233,37 @@ class scGPTTrainer:
         optimizer: torch.optim.Optimizer,
         scheduler: torch.optim.lr_scheduler.LRScheduler,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
+        use_accelerate: bool = True,
     ):
         """Initialize trainer."""
-        self.model = model.to(device)
+        self.use_accelerate = use_accelerate
+
+        # Initialize Accelerator
+        if self.use_accelerate:
+            self.accelerator = Accelerator()
+            logger.info(f"Initializing scGPTTrainer with Accelerate")
+            logger.info(f"  Device: {self.accelerator.device}")
+            logger.info(f"  Process index: {self.accelerator.process_index}")
+            logger.info(f"  Number of processes: {self.accelerator.num_processes}")
+        else:
+            self.accelerator = None
+            self.device = device
+            logger.info(f"Initializing scGPTTrainer on device: {device}")
+            model = model.to(device)
+
+        self.model = model
         self.optimizer = optimizer
         self.scheduler = scheduler
-        self.device = device
+
+        # Prepare model, optimizer, and scheduler with Accelerate
+        if self.use_accelerate:
+            self.model, self.optimizer, self.scheduler = self.accelerator.prepare(
+                self.model, self.optimizer, self.scheduler
+            )
+            logger.info("Model, optimizer, and scheduler prepared with Accelerate")
+        else:
+            self.device = device
+
         self.criterion = torch.nn.BCEWithLogitsLoss()
         self.best_val_loss = float("inf")
         self.patience_counter = 0
@@ -250,10 +276,17 @@ class scGPTTrainer:
         num_batches = 0
 
         for batch_idx, batch in enumerate(train_loader):
-            gene_ids = batch["gene_ids"].to(self.device)
-            values = batch["values"].to(self.device)
-            padding_mask = batch["padding_mask"].to(self.device)
-            labels = batch["labels"].to(self.device).float().unsqueeze(1)
+            # No need to move to device with Accelerate - it handles this
+            if not self.use_accelerate:
+                gene_ids = batch["gene_ids"].to(self.device)
+                values = batch["values"].to(self.device)
+                padding_mask = batch["padding_mask"].to(self.device)
+                labels = batch["labels"].to(self.device).float().unsqueeze(1)
+            else:
+                gene_ids = batch["gene_ids"]
+                values = batch["values"]
+                padding_mask = batch["padding_mask"]
+                labels = batch["labels"].float().unsqueeze(1)
 
             # Forward pass
             self.optimizer.zero_grad()
@@ -264,11 +297,17 @@ class scGPTTrainer:
             )
             loss = self.criterion(logits, labels)
 
-            # Backward pass
-            loss.backward()
+            # Backward pass with Accelerate
+            if self.use_accelerate:
+                self.accelerator.backward(loss)
+            else:
+                loss.backward()
 
             # Gradient clipping
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+            if self.use_accelerate:
+                self.accelerator.clip_grad_norm_(self.model.parameters(), 1.0)
+            else:
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
 
             # Optimizer step
             self.optimizer.step()
@@ -283,12 +322,13 @@ class scGPTTrainer:
             total_accuracy += accuracy.item()
             num_batches += 1
 
-            # Logging
+            # Logging (only on main process when using Accelerate)
             if (batch_idx + 1) % 50 == 0:
-                logger.info(
-                    f"Epoch {epoch} | Batch {batch_idx + 1}/{len(train_loader)} | "
-                    f"Loss: {loss.item():.4f} | Acc: {accuracy.item():.4f}"
-                )
+                if not self.use_accelerate or self.accelerator.is_main_process:
+                    logger.info(
+                        f"Epoch {epoch} | Batch {batch_idx + 1}/{len(train_loader)} | "
+                        f"Loss: {loss.item():.4f} | Acc: {accuracy.item():.4f}"
+                    )
 
         avg_loss = total_loss / num_batches
         avg_accuracy = total_accuracy / num_batches
@@ -304,10 +344,17 @@ class scGPTTrainer:
 
         with torch.no_grad():
             for batch in val_loader:
-                gene_ids = batch["gene_ids"].to(self.device)
-                values = batch["values"].to(self.device)
-                padding_mask = batch["padding_mask"].to(self.device)
-                labels = batch["labels"].to(self.device).float().unsqueeze(1)
+                # No need to move to device with Accelerate - it handles this
+                if not self.use_accelerate:
+                    gene_ids = batch["gene_ids"].to(self.device)
+                    values = batch["values"].to(self.device)
+                    padding_mask = batch["padding_mask"].to(self.device)
+                    labels = batch["labels"].to(self.device).float().unsqueeze(1)
+                else:
+                    gene_ids = batch["gene_ids"]
+                    values = batch["values"]
+                    padding_mask = batch["padding_mask"]
+                    labels = batch["labels"].float().unsqueeze(1)
 
                 logits = self.model(
                     gene_ids=gene_ids,
@@ -342,7 +389,8 @@ class scGPTTrainer:
             "val_accuracy": [],
         }
 
-        logger.info(f"Starting fine-tuning: {num_epochs} epochs, patience={patience}")
+        if not self.use_accelerate or self.accelerator.is_main_process:
+            logger.info(f"Starting fine-tuning: {num_epochs} epochs, patience={patience}")
 
         for epoch in range(num_epochs):
             # Train
@@ -355,22 +403,25 @@ class scGPTTrainer:
             history["val_loss"].append(val_loss)
             history["val_accuracy"].append(val_acc)
 
-            logger.info(
-                f"Epoch {epoch:3d} | Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | "
-                f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f}"
-            )
+            if not self.use_accelerate or self.accelerator.is_main_process:
+                logger.info(
+                    f"Epoch {epoch:3d} | Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | "
+                    f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f}"
+                )
 
             # Early stopping
             if val_loss < self.best_val_loss:
                 self.best_val_loss = val_loss
                 self.patience_counter = 0
-                logger.info(f"  → New best validation loss: {val_loss:.4f}")
+                if not self.use_accelerate or self.accelerator.is_main_process:
+                    logger.info(f"  → New best validation loss: {val_loss:.4f}")
             else:
                 self.patience_counter += 1
                 if self.patience_counter >= patience:
-                    logger.info(
-                        f"Early stopping triggered (patience {patience} reached)"
-                    )
+                    if not self.use_accelerate or self.accelerator.is_main_process:
+                        logger.info(
+                            f"Early stopping triggered (patience {patience} reached)"
+                        )
                     break
 
         return history
@@ -392,6 +443,8 @@ def parse_arguments():
     parser.add_argument("--freeze-layers", type=int, default=6, help="Number of layers to freeze (default: 6)")
     parser.add_argument("--warmup-steps", type=int, default=500, help="Warmup steps for scheduler (default: 500)")
     parser.add_argument("--patience", type=int, default=3, help="Early stopping patience (default: 3)")
+    parser.add_argument("--use-accelerate", action="store_true", default=True, help="Use Accelerate for distributed training (default: True)")
+    parser.add_argument("--no-accelerate", dest="use_accelerate", action="store_false", help="Disable Accelerate and use single GPU/CPU")
     return parser.parse_args()
 
 
@@ -482,12 +535,14 @@ def main():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     logger.info(f"Using device: {device}")
+    logger.info(f"Using Accelerate: {args.use_accelerate}")
 
     trainer = scGPTTrainer(
         model=model,
         optimizer=optimizer,
         scheduler=scheduler,
         device=device,
+        use_accelerate=args.use_accelerate,
     )
 
     # Step 5: Fine-tune model
@@ -496,16 +551,22 @@ def main():
     logger.info("=" * 80)
     history = trainer.fit(train_loader, val_loader, num_epochs=args.epochs, patience=args.patience)
 
-    # Save checkpoint
+    # Save checkpoint (unwrap model if using Accelerate)
     checkpoint_path = output_dir / "checkpoint.pt"
-    torch.save(model.state_dict(), checkpoint_path)
+    if args.use_accelerate:
+        model_to_save = trainer.accelerator.unwrap_model(trainer.model)
+    else:
+        model_to_save = model
+    torch.save(model_to_save.state_dict(), checkpoint_path)
     logger.info(f"Saved model checkpoint to {checkpoint_path}")
 
     # Step 6: Evaluate on test set
     logger.info("\n" + "=" * 80)
     logger.info("STEP 6: Test Set Evaluation")
     logger.info("=" * 80)
-    evaluator = ModelEvaluator(model, device=device)
+    # Use unwrapped model for evaluation
+    eval_model = model_to_save
+    evaluator = ModelEvaluator(eval_model, device=device)
     test_metrics = evaluator.evaluate(test_loader, dataset_name="test")
 
     # Classification report
