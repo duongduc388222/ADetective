@@ -354,24 +354,44 @@ class SEAADDataLoader:
 
         return adata_hvg
 
-    def check_normalization(self, adata: ad.AnnData) -> Dict[str, Any]:
+    def check_preprocessing_state(self, adata: ad.AnnData) -> Dict[str, Any]:
         """
-        Check if data is normalized.
+        Check preprocessing state of data (log transformation and normalization).
 
         Args:
             adata: AnnData object
 
         Returns:
-            Dictionary with normalization status
+            Dictionary with preprocessing status: is_log_transformed, is_normalized, dtype
         """
-        # Check for log-normalization indicators
-        is_normalized = "log1p" in adata.obs_names or np.allclose(
-            adata.X.sum(axis=1), 1.0, rtol=0.1
-        )
+        # Check for log transformation
+        # Log-transformed data typically has:
+        # - Maximum values < 20 (since log1p(large_number) is relatively small)
+        # - Minimum values >= 0 (log1p never produces negative values)
+        X_data = adata.X
+        if hasattr(X_data, 'toarray'):
+            # Handle sparse matrices
+            max_val = X_data.max()
+            min_val = X_data.min()
+        else:
+            max_val = np.max(X_data)
+            min_val = np.min(X_data)
 
-        logger.info(f"Normalization status: {'Normalized' if is_normalized else 'Not normalized'}")
+        is_log_transformed = (max_val < 20) and (min_val >= 0)
 
-        return {"is_normalized": is_normalized, "dtype": str(adata.X.dtype)}
+        # Check for normalization (library-size normalization)
+        # Normalized data has row sums approximately equal to a constant
+        row_sums = np.array(X_data.sum(axis=1)).flatten()
+        is_normalized = np.std(row_sums) / np.mean(row_sums) < 0.1  # CV < 10%
+
+        logger.info(f"Log transformation status: {'Yes' if is_log_transformed else 'No'}")
+        logger.info(f"Normalization status: {'Yes' if is_normalized else 'No'}")
+
+        return {
+            "is_log_transformed": is_log_transformed,
+            "is_normalized": is_normalized,
+            "dtype": str(X_data.dtype)
+        }
 
     def save_processed(self, adata: ad.AnnData, output_path: str) -> None:
         """

@@ -200,15 +200,15 @@ def main():
     except Exception as e:
         logger.warning(f"Could not select HVGs: {e}")
 
-    # Step 8: Check normalization
+    # Step 8: Check preprocessing state
     logger.info("\n" + "=" * 80)
-    logger.info("STEP 8: Checking Normalization")
+    logger.info("STEP 8: Checking Preprocessing State")
     logger.info("=" * 80)
     try:
-        norm_info = loader.check_normalization(train_data)
-        logger.info(f"Normalization status: {norm_info}")
+        preprocess_info = loader.check_preprocessing_state(train_data)
+        logger.info(f"Preprocessing state: {preprocess_info}")
     except Exception as e:
-        logger.warning(f"Could not check normalization: {e}")
+        logger.warning(f"Could not check preprocessing state: {e}")
 
     # Step 9: Save processed data
     logger.info("\n" + "=" * 80)
