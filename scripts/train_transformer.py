@@ -159,7 +159,7 @@ def parse_arguments():
     parser.add_argument("--gradient-clip", type=float, default=1.0, help="Gradient clipping value (default: 1.0)")
     parser.add_argument("--patience", type=int, default=10, help="Early stopping patience (default: 10)")
     parser.add_argument("--expression-scaling", type=str, default="multiplicative", choices=["multiplicative", "additive", "concatenate"], help="Expression scaling method")
-    parser.add_argument("--use-accelerate", action="store_true", default=True, help="Use Accelerate for distributed training (default: True)")
+    parser.add_argument("--use-accelerate", action="store_true", default=False, help="Use Accelerate for distributed training (default: True)")
     parser.add_argument("--no-accelerate", dest="use_accelerate", action="store_false", help="Disable Accelerate and use single GPU/CPU")
     return parser.parse_args()
 
