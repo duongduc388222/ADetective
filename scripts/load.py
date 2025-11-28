@@ -33,15 +33,25 @@ def parse_arguments():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Local usage
+  # Local usage (without normalization)
   python scripts/load.py \\
     --data-path ./data/SEAAD_A9_RNAseq_DREAM_Cleaned.h5ad \\
     --output-dir ./results
+
+  # With normalization and custom parameters
+  python scripts/load.py \\
+    --data-path ./data/SEAAD_A9_RNAseq_DREAM_Cleaned.h5ad \\
+    --output-dir ./results \\
+    --normalize \\
+    --target-sum 10000 \\
+    --n-hvgs 2000 \\
+    --min-label-ratio 0.3
 
   # Google Colab
   python scripts/load.py \\
     --data-path /content/SEAAD_A9_RNAseq_DREAM_Cleaned.h5ad \\
     --output-dir ./results \\
+    --normalize \\
     --n-hvgs 2000
         """,
     )
@@ -86,6 +96,26 @@ Examples:
         type=int,
         default=2000,
         help="Number of highly variable genes to select (default: 2000)",
+    )
+
+    parser.add_argument(
+        "--normalize",
+        action="store_true",
+        help="Normalize RNA-seq data (library-size normalization + log1p transform)",
+    )
+
+    parser.add_argument(
+        "--target-sum",
+        type=float,
+        default=1e4,
+        help="Target sum for library-size normalization (default: 10000)",
+    )
+
+    parser.add_argument(
+        "--min-label-ratio",
+        type=float,
+        default=0.3,
+        help="Minimum ratio for minority class in each split (default: 0.3)",
     )
 
     return parser.parse_args()
@@ -165,9 +195,35 @@ def main():
         logger.error(f"Error details: {e}")
         return False
 
-    # Step 5: Get donor distribution
+    # Step 5: Check preprocessing state
     logger.info("\n" + "=" * 80)
-    logger.info("STEP 5: Donor Distribution")
+    logger.info("STEP 5: Checking Preprocessing State")
+    logger.info("=" * 80)
+    try:
+        preprocess_info = loader.check_preprocessing_state(adata)
+        logger.info(f"Preprocessing state: {preprocess_info}")
+    except Exception as e:
+        logger.warning(f"Could not check preprocessing state: {e}")
+
+    # Step 6: Normalize data (if requested)
+    if args.normalize:
+        logger.info("\n" + "=" * 80)
+        logger.info("STEP 6: Normalizing Data")
+        logger.info("=" * 80)
+        try:
+            adata = loader.normalize_data(adata, target_sum=args.target_sum)
+        except Exception as e:
+            logger.error(f"Failed to normalize data: {e}")
+            return False
+    else:
+        logger.info("\n" + "=" * 80)
+        logger.info("STEP 6: Skipping Normalization (--normalize not set)")
+        logger.info("=" * 80)
+        logger.info("Note: Use --normalize flag to perform library-size normalization and log1p transform")
+
+    # Step 7: Get donor distribution
+    logger.info("\n" + "=" * 80)
+    logger.info("STEP 7: Donor Distribution")
     logger.info("=" * 80)
     try:
         donor_info = loader.get_donor_info()
@@ -175,23 +231,24 @@ def main():
     except Exception as e:
         logger.warning(f"Could not retrieve donor info: {e}")
 
-    # Step 6: Create stratified splits
+    # Step 8: Create stratified splits
     logger.info("\n" + "=" * 80)
-    logger.info("STEP 6: Creating Train/Val/Test Splits")
+    logger.info("STEP 8: Creating Train/Val/Test Splits")
     logger.info("=" * 80)
     try:
         train_data, val_data, test_data = loader.stratified_split(
             train_ratio=args.train_ratio,
             val_ratio=args.val_ratio,
             test_ratio=args.test_ratio,
+            min_label_ratio=args.min_label_ratio,
         )
     except Exception as e:
         logger.error(f"Failed to create splits: {e}")
         return False
 
-    # Step 7: Select HVGs
+    # Step 9: Select HVGs
     logger.info("\n" + "=" * 80)
-    logger.info("STEP 7: Selecting Highly Variable Genes")
+    logger.info("STEP 9: Selecting Highly Variable Genes")
     logger.info("=" * 80)
     try:
         train_data = loader.select_hvgs(train_data, args.n_hvgs)
@@ -200,19 +257,19 @@ def main():
     except Exception as e:
         logger.warning(f"Could not select HVGs: {e}")
 
-    # Step 8: Check preprocessing state
+    # Step 10: Verify final preprocessing state
     logger.info("\n" + "=" * 80)
-    logger.info("STEP 8: Checking Preprocessing State")
+    logger.info("STEP 10: Verifying Final Preprocessing State")
     logger.info("=" * 80)
     try:
         preprocess_info = loader.check_preprocessing_state(train_data)
-        logger.info(f"Preprocessing state: {preprocess_info}")
+        logger.info(f"Final preprocessing state: {preprocess_info}")
     except Exception as e:
         logger.warning(f"Could not check preprocessing state: {e}")
 
-    # Step 9: Save processed data
+    # Step 11: Save processed data
     logger.info("\n" + "=" * 80)
-    logger.info("STEP 9: Saving Processed Data")
+    logger.info("STEP 11: Saving Processed Data")
     logger.info("=" * 80)
     try:
         train_path = str(output_dir / "train.h5ad")

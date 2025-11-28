@@ -244,17 +244,22 @@ class SEAADDataLoader:
         val_ratio: float = 0.1,
         test_ratio: float = 0.2,
         random_state: int = 42,
+        min_label_ratio: float = 0.3,
     ) -> Tuple[ad.AnnData, ad.AnnData, ad.AnnData]:
         """
-        Create donor-level stratified train/val/test split.
+        Create donor-level stratified train/val/test split with balanced label distribution.
 
-        Ensures no donor appears in multiple splits using configured donor column.
+        Ensures:
+        - No donor appears in multiple splits
+        - Each split maintains balanced label distribution (both High and Not AD)
+        - Validates that minority class is at least min_label_ratio in each split
 
         Args:
             train_ratio: Training set ratio
             val_ratio: Validation set ratio
             test_ratio: Test set ratio
             random_state: Random seed
+            min_label_ratio: Minimum ratio for minority class in each split (default: 0.3)
 
         Returns:
             Tuple of (train_adata, val_adata, test_adata)
@@ -271,30 +276,39 @@ class SEAADDataLoader:
                 f"Available columns: {list(self.adata.obs.columns)}"
             )
 
-        logger.info("Creating donor-level stratified split")
+        logger.info("Creating donor-level stratified split with label balance validation")
         logger.info(f"Split ratios: train={train_ratio}, val={val_ratio}, test={test_ratio}")
         logger.info(f"Using donor column: {self.donor_column}")
+        logger.info(f"Minimum label ratio per split: {min_label_ratio:.1%}")
 
-        # Get unique donors per class
-        unique_donors = self.adata.obs[[self.donor_column, "label"]].drop_duplicates()
+        # Get donor-level label (majority vote per donor to ensure stratification works properly)
+        donor_labels = (
+            self.adata.obs.groupby(self.donor_column)["label"]
+            .agg(lambda x: x.mode()[0] if len(x.mode()) > 0 else x.iloc[0])
+            .reset_index()
+        )
+        donor_labels.columns = [self.donor_column, "donor_label"]
+
+        logger.info(f"Total unique donors: {len(donor_labels)}")
+        logger.info(f"Donor-level label distribution:")
+        logger.info(donor_labels["donor_label"].value_counts().to_dict())
 
         # First split: train+val vs test
-        donors_train_val, donors_test, _, _ = train_test_split(
-            unique_donors[self.donor_column],
-            unique_donors["label"],
+        donors_train_val, donors_test = train_test_split(
+            donor_labels[self.donor_column],
             test_size=test_ratio,
             random_state=random_state,
-            stratify=unique_donors["label"],
+            stratify=donor_labels["donor_label"],
         )
 
         # Second split: train vs val
         val_size = val_ratio / (train_ratio + val_ratio)
-        donors_train, donors_val, _, _ = train_test_split(
-            donors_train_val,
-            unique_donors[unique_donors[self.donor_column].isin(donors_train_val)]["label"],
+        train_val_labels = donor_labels[donor_labels[self.donor_column].isin(donors_train_val)]
+        donors_train, donors_val = train_test_split(
+            train_val_labels[self.donor_column],
             test_size=val_size,
             random_state=random_state,
-            stratify=unique_donors[unique_donors[self.donor_column].isin(donors_train_val)]["label"],
+            stratify=train_val_labels["donor_label"],
         )
 
         # Create splits (loads each split into memory separately)
@@ -310,14 +324,44 @@ class SEAADDataLoader:
         logger.info(f"Test set:  {test_adata.n_obs:,} cells from {donors_test.nunique()} donors")
         logger.info(f"✓ Splits created and loaded into memory")
 
-        # Log label distributions
+        # Validate label distributions
+        logger.info("\n" + "="*60)
+        logger.info("LABEL DISTRIBUTION VALIDATION")
+        logger.info("="*60)
+
+        all_balanced = True
         for split_name, split_data in [
             ("Train", train_adata),
             ("Val", val_adata),
             ("Test", test_adata),
         ]:
             label_dist = split_data.obs["label_name"].value_counts()
-            logger.info(f"{split_name} label distribution: {label_dist.to_dict()}")
+            label_ratios = label_dist / label_dist.sum()
+
+            logger.info(f"\n{split_name} set:")
+            logger.info(f"  Counts: {label_dist.to_dict()}")
+            logger.info(f"  Ratios: {label_ratios.to_dict()}")
+
+            # Check if minority class meets minimum threshold
+            min_ratio = label_ratios.min()
+            if min_ratio < min_label_ratio:
+                logger.warning(
+                    f"  ⚠️  WARNING: Minority class ratio ({min_ratio:.1%}) is below "
+                    f"minimum threshold ({min_label_ratio:.1%})"
+                )
+                all_balanced = False
+            else:
+                logger.info(f"  ✓ Label distribution is balanced (min ratio: {min_ratio:.1%})")
+
+        logger.info("="*60)
+
+        if all_balanced:
+            logger.info("✓ All splits have balanced label distributions")
+        else:
+            logger.warning(
+                "⚠️  Some splits have imbalanced label distributions. "
+                "Consider adjusting split ratios or using different random_state."
+            )
 
         return train_adata, val_adata, test_adata
 
@@ -353,6 +397,52 @@ class SEAADDataLoader:
         logger.info(f"✓ Selected {adata_hvg.n_vars:,} highly variable genes and loaded into memory")
 
         return adata_hvg
+
+    def normalize_data(self, adata: ad.AnnData, target_sum: float = 1e4) -> ad.AnnData:
+        """
+        Normalize RNA-seq data to library size and log-transform.
+
+        Performs library-size normalization (each cell to same total count)
+        followed by log1p transformation.
+
+        Args:
+            adata: AnnData object
+            target_sum: Target sum for library size normalization (default: 10,000)
+
+        Returns:
+            Normalized and log-transformed AnnData object
+        """
+        import scanpy as sc
+
+        # Check current preprocessing state
+        preproc_state = self.check_preprocessing_state(adata)
+
+        if preproc_state["is_normalized"] and preproc_state["is_log_transformed"]:
+            logger.info("Data already normalized and log-transformed, skipping...")
+            return adata
+
+        logger.info(f"Normalizing data to target_sum={target_sum} and log-transforming...")
+
+        if not preproc_state["is_normalized"]:
+            logger.info("📊 Performing library-size normalization...")
+            sc.pp.normalize_total(adata, target_sum=target_sum)
+            logger.info("✓ Normalization complete")
+        else:
+            logger.info("Data already normalized, skipping normalization step")
+
+        if not preproc_state["is_log_transformed"]:
+            logger.info("📊 Performing log1p transformation...")
+            sc.pp.log1p(adata)
+            logger.info("✓ Log transformation complete")
+        else:
+            logger.info("Data already log-transformed, skipping log transformation step")
+
+        # Verify preprocessing
+        final_state = self.check_preprocessing_state(adata)
+        logger.info(f"Final preprocessing state: normalized={final_state['is_normalized']}, "
+                   f"log_transformed={final_state['is_log_transformed']}")
+
+        return adata
 
     def check_preprocessing_state(self, adata: ad.AnnData) -> Dict[str, Any]:
         """
