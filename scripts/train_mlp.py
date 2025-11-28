@@ -75,14 +75,23 @@ def load_data(data_dir: Path) -> tuple:
     logger.info(f"Loading test data from {test_path}")
     test_data = ad.read_h5ad(test_path)
 
-    # Extract features and labels
-    X_train = np.asarray(train_data.X, dtype=np.float32)
+    # Extract features and labels (handle sparse matrices)
+    def to_dense_array(X):
+        """Convert matrix to dense numpy array (handles both sparse and dense)."""
+        if hasattr(X, 'toarray'):
+            # Sparse matrix
+            return X.toarray().astype(np.float32)
+        else:
+            # Dense matrix
+            return np.asarray(X, dtype=np.float32)
+
+    X_train = to_dense_array(train_data.X)
     y_train = train_data.obs["label"].values.astype(np.int64)
 
-    X_val = np.asarray(val_data.X, dtype=np.float32)
+    X_val = to_dense_array(val_data.X)
     y_val = val_data.obs["label"].values.astype(np.int64)
 
-    X_test = np.asarray(test_data.X, dtype=np.float32)
+    X_test = to_dense_array(test_data.X)
     y_test = test_data.obs["label"].values.astype(np.int64)
 
     logger.info(f"Train: {X_train.shape}, {y_train.shape}")
