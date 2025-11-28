@@ -33,16 +33,21 @@ def parse_arguments():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Local usage (without normalization)
+  # Local usage (with normalization enabled by default)
   python scripts/load.py \\
     --data-path ./data/SEAAD_A9_RNAseq_DREAM_Cleaned.h5ad \\
     --output-dir ./results
 
-  # With normalization and custom parameters
+  # Skip normalization
   python scripts/load.py \\
     --data-path ./data/SEAAD_A9_RNAseq_DREAM_Cleaned.h5ad \\
     --output-dir ./results \\
-    --normalize \\
+    --no-normalize
+
+  # Custom parameters
+  python scripts/load.py \\
+    --data-path ./data/SEAAD_A9_RNAseq_DREAM_Cleaned.h5ad \\
+    --output-dir ./results \\
     --target-sum 10000 \\
     --n-hvgs 2000 \\
     --min-label-ratio 0.3
@@ -51,72 +56,19 @@ Examples:
   python scripts/load.py \\
     --data-path /content/SEAAD_A9_RNAseq_DREAM_Cleaned.h5ad \\
     --output-dir ./results \\
-    --normalize \\
     --n-hvgs 2000
         """,
     )
 
-    parser.add_argument(
-        "--data-path",
-        type=str,
-        required=True,
-        help="Path to the SEAAD H5AD file (e.g., /content/SEAAD_A9_RNAseq_DREAM_Cleaned.h5ad)",
-    )
-
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        default="./results",
-        help="Directory to save processed data (default: ./results)",
-    )
-
-    parser.add_argument(
-        "--train-ratio",
-        type=float,
-        default=0.7,
-        help="Fraction of donors for training set (default: 0.7)",
-    )
-
-    parser.add_argument(
-        "--val-ratio",
-        type=float,
-        default=0.1,
-        help="Fraction of donors for validation set (default: 0.1)",
-    )
-
-    parser.add_argument(
-        "--test-ratio",
-        type=float,
-        default=0.2,
-        help="Fraction of donors for test set (default: 0.2)",
-    )
-
-    parser.add_argument(
-        "--n-hvgs",
-        type=int,
-        default=2000,
-        help="Number of highly variable genes to select (default: 2000)",
-    )
-
-    parser.add_argument(
-        "--normalize",
-        action="store_true",
-        help="Normalize RNA-seq data (library-size normalization + log1p transform)",
-    )
-
-    parser.add_argument(
-        "--target-sum",
-        type=float,
-        default=1e4,
-        help="Target sum for library-size normalization (default: 10000)",
-    )
-
-    parser.add_argument(
-        "--min-label-ratio",
-        type=float,
-        default=0.3,
-        help="Minimum ratio for minority class in each split (default: 0.3)",
-    )
+    parser.add_argument("--data-path", type=str, required=True, help="Path to the SEAAD H5AD file (e.g., /content/SEAAD_A9_RNAseq_DREAM_Cleaned.h5ad)")
+    parser.add_argument("--output-dir", type=str, default="./results", help="Directory to save processed data (default: ./results)")
+    parser.add_argument("--train-ratio", type=float, default=0.7, help="Fraction of donors for training set (default: 0.7)")
+    parser.add_argument("--val-ratio", type=float, default=0.1, help="Fraction of donors for validation set (default: 0.1)")
+    parser.add_argument("--test-ratio", type=float, default=0.2, help="Fraction of donors for test set (default: 0.2)")
+    parser.add_argument("--n-hvgs", type=int, default=2000, help="Number of highly variable genes to select (default: 2000)")
+    parser.add_argument("--no-normalize", action="store_true", help="Skip normalization (library-size normalization + log1p transform)")
+    parser.add_argument("--target-sum", type=float, default=1e4, help="Target sum for library-size normalization (default: 10000)")
+    parser.add_argument("--min-label-ratio", type=float, default=0.3, help="Minimum ratio for minority class in each split (default: 0.3)")
 
     return parser.parse_args()
 
@@ -205,8 +157,8 @@ def main():
     except Exception as e:
         logger.warning(f"Could not check preprocessing state: {e}")
 
-    # Step 6: Normalize data (if requested)
-    if args.normalize:
+    # Step 6: Normalize data (enabled by default)
+    if not args.no_normalize:
         logger.info("\n" + "=" * 80)
         logger.info("STEP 6: Normalizing Data")
         logger.info("=" * 80)
@@ -217,9 +169,9 @@ def main():
             return False
     else:
         logger.info("\n" + "=" * 80)
-        logger.info("STEP 6: Skipping Normalization (--normalize not set)")
+        logger.info("STEP 6: Skipping Normalization (--no-normalize flag set)")
         logger.info("=" * 80)
-        logger.info("Note: Use --normalize flag to perform library-size normalization and log1p transform")
+        logger.info("Note: Normalization is enabled by default. Use --no-normalize to skip.")
 
     # Step 7: Get donor distribution
     logger.info("\n" + "=" * 80)
