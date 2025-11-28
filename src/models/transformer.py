@@ -504,6 +504,11 @@ class TransformerTrainer:
         if num_epochs is None:
             num_epochs = self.config["training"]["epochs"]
 
+        # Prepare dataloaders with Accelerate
+        if self.use_accelerate:
+            train_loader, val_loader = self.accelerator.prepare(train_loader, val_loader)
+            logger.info("Dataloaders prepared with Accelerate")
+
         history = {
             "train_loss": [],
             "train_accuracy": [],
