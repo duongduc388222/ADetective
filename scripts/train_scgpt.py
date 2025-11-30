@@ -22,6 +22,7 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset
 import anndata as ad
 from accelerate import Accelerator
+import scipy.sparse
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -58,14 +59,14 @@ def load_data(data_dir: Path) -> tuple:
     logger.info(f"Loading test data from {test_path}")
     test_data = ad.read_h5ad(test_path)
 
-    # Extract features and labels
-    X_train = np.asarray(train_data.X, dtype=np.float32)
+    # Extract features and labels (handle sparse matrices for numpy 2.x compatibility)
+    X_train = (train_data.X.toarray() if scipy.sparse.issparse(train_data.X) else train_data.X).astype(np.float32)
     y_train = train_data.obs["label"].values.astype(np.int64)
 
-    X_val = np.asarray(val_data.X, dtype=np.float32)
+    X_val = (val_data.X.toarray() if scipy.sparse.issparse(val_data.X) else val_data.X).astype(np.float32)
     y_val = val_data.obs["label"].values.astype(np.int64)
 
-    X_test = np.asarray(test_data.X, dtype=np.float32)
+    X_test = (test_data.X.toarray() if scipy.sparse.issparse(test_data.X) else test_data.X).astype(np.float32)
     y_test = test_data.obs["label"].values.astype(np.int64)
 
     logger.info(f"Train: {X_train.shape}, {y_train.shape}")

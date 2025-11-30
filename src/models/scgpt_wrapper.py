@@ -171,14 +171,10 @@ class scGPTWrapper(nn.Module):
             except Exception as e:
                 logger.warning(f"Could not load vocab from {vocab_path}: {e}")
                 logger.info("Creating new vocabulary from dataset genes")
-                vocab = GeneVocab()
-                for gene in gene_names:
-                    vocab.append_token(gene)
+                vocab = GeneVocab(gene_list_or_vocab=gene_names)
         else:
             # Create vocabulary from dataset genes
-            vocab = GeneVocab()
-            for gene in gene_names:
-                vocab.append_token(gene)
+            vocab = GeneVocab(gene_list_or_vocab=gene_names)
             logger.info(f"Created gene vocabulary from dataset with {len(vocab)} genes")
 
         # Add special tokens if not present
