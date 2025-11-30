@@ -324,6 +324,22 @@ class SEAADDataLoader:
         logger.info(f"Test set:  {test_adata.n_obs:,} cells from {donors_test.nunique()} donors")
         logger.info(f"✓ Splits created and loaded into memory")
 
+        # CRITICAL: Check for single-class splits (causes overfitting)
+        for split_name, split_data in [("Validation", val_adata), ("Test", test_adata)]:
+            label_counts = split_data.obs["label"].value_counts()
+            if len(label_counts) < 2:
+                error_msg = (
+                    f"❌ CRITICAL ERROR: {split_name} set has only one class!\n"
+                    f"  Current distribution: {label_counts.to_dict()}\n"
+                    f"  This will cause severe overfitting and invalid evaluation.\n\n"
+                    f"  Solutions:\n"
+                    f"  1. Increase --val-ratio and --test-ratio (try 0.15/0.15 instead of 0.1/0.2)\n"
+                    f"  2. Try a different random_state\n"
+                    f"  3. Use more donors if possible"
+                )
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+
         # Validate label distributions
         logger.info("\n" + "="*60)
         logger.info("LABEL DISTRIBUTION VALIDATION")

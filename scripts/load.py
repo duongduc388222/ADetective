@@ -63,8 +63,8 @@ Examples:
     parser.add_argument("--data-path", type=str, required=True, help="Path to the SEAAD H5AD file (e.g., /content/SEAAD_A9_RNAseq_DREAM_Cleaned.h5ad)")
     parser.add_argument("--output-dir", type=str, default="./results", help="Directory to save processed data (default: ./results)")
     parser.add_argument("--train-ratio", type=float, default=0.7, help="Fraction of donors for training set (default: 0.7)")
-    parser.add_argument("--val-ratio", type=float, default=0.1, help="Fraction of donors for validation set (default: 0.1)")
-    parser.add_argument("--test-ratio", type=float, default=0.2, help="Fraction of donors for test set (default: 0.2)")
+    parser.add_argument("--val-ratio", type=float, default=0.15, help="Fraction of donors for validation set (default: 0.15, increased from 0.1 for better stratification)")
+    parser.add_argument("--test-ratio", type=float, default=0.15, help="Fraction of donors for test set (default: 0.15, decreased from 0.2 for better stratification)")
     parser.add_argument("--n-hvgs", type=int, default=2000, help="Number of highly variable genes to select (default: 2000)")
     parser.add_argument("--no-normalize", action="store_true", help="Skip normalization (library-size normalization + log1p transform)")
     parser.add_argument("--target-sum", type=float, default=1e4, help="Target sum for library-size normalization (default: 10000)")
@@ -157,25 +157,9 @@ def main():
     except Exception as e:
         logger.warning(f"Could not check preprocessing state: {e}")
 
-    # Step 6: Normalize data (enabled by default)
-    if not args.no_normalize:
-        logger.info("\n" + "=" * 80)
-        logger.info("STEP 6: Normalizing Data")
-        logger.info("=" * 80)
-        try:
-            adata = loader.normalize_data(adata, target_sum=args.target_sum)
-        except Exception as e:
-            logger.error(f"Failed to normalize data: {e}")
-            return False
-    else:
-        logger.info("\n" + "=" * 80)
-        logger.info("STEP 6: Skipping Normalization (--no-normalize flag set)")
-        logger.info("=" * 80)
-        logger.info("Note: Normalization is enabled by default. Use --no-normalize to skip.")
-
-    # Step 7: Get donor distribution
+    # Step 6: Get donor distribution
     logger.info("\n" + "=" * 80)
-    logger.info("STEP 7: Donor Distribution")
+    logger.info("STEP 6: Donor Distribution")
     logger.info("=" * 80)
     try:
         donor_info = loader.get_donor_info()
@@ -183,7 +167,7 @@ def main():
     except Exception as e:
         logger.warning(f"Could not retrieve donor info: {e}")
 
-    # Step 8: Create stratified splits
+    # Step 7: Create stratified splits (BEFORE normalization to prevent data leakage)
     logger.info("\n" + "=" * 80)
     logger.info("STEP 8: Creating Train/Val/Test Splits")
     logger.info("=" * 80)
@@ -198,16 +182,63 @@ def main():
         logger.error(f"Failed to create splits: {e}")
         return False
 
-    # Step 9: Select HVGs
+    # Step 9: Select HVGs (only on training data to prevent data leakage)
     logger.info("\n" + "=" * 80)
     logger.info("STEP 9: Selecting Highly Variable Genes")
     logger.info("=" * 80)
     try:
+        # Select HVGs on training data only
+        logger.info(f"Selecting {args.n_hvgs} HVGs from training data...")
         train_data = loader.select_hvgs(train_data, args.n_hvgs)
-        val_data = loader.select_hvgs(val_data, args.n_hvgs)
-        test_data = loader.select_hvgs(test_data, args.n_hvgs)
+        hvg_genes = train_data.var_names.copy()
+
+        logger.info(f"✓ Selected {len(hvg_genes)} HVGs from training set")
+        logger.info(f"Subsetting validation and test sets to use the same genes...")
+
+        # Subset val and test to use the SAME genes as training (prevent data leakage)
+        val_data = val_data[:, hvg_genes].copy()
+        test_data = test_data[:, hvg_genes].copy()
+
+        logger.info(f"✓ Val data subset to {val_data.n_vars} genes (same as train)")
+        logger.info(f"✓ Test data subset to {test_data.n_vars} genes (same as train)")
+
+        # Verify gene overlap
+        train_genes_set = set(train_data.var_names)
+        val_genes_set = set(val_data.var_names)
+        test_genes_set = set(test_data.var_names)
+
+        assert train_genes_set == val_genes_set == test_genes_set, \
+            "Gene sets must be identical across splits!"
+        logger.info(f"✓ Verified: All splits use identical {len(train_genes_set)} genes")
+
     except Exception as e:
         logger.warning(f"Could not select HVGs: {e}")
+
+    # Step 8: Normalize data (AFTER splitting to prevent data leakage)
+    if not args.no_normalize:
+        logger.info("\n" + "=" * 80)
+        logger.info("STEP 8: Normalizing Data (After Split)")
+        logger.info("=" * 80)
+        logger.info("ℹ️  Normalizing each split independently to prevent data leakage")
+        try:
+            logger.info("Normalizing training set...")
+            train_data = loader.normalize_data(train_data, target_sum=args.target_sum)
+
+            logger.info("Normalizing validation set...")
+            val_data = loader.normalize_data(val_data, target_sum=args.target_sum)
+
+            logger.info("Normalizing test set...")
+            test_data = loader.normalize_data(test_data, target_sum=args.target_sum)
+
+            logger.info("✓ All splits normalized independently")
+        except Exception as e:
+            logger.error(f"Failed to normalize data: {e}")
+            return False
+    else:
+        logger.info("\n" + "=" * 80)
+        logger.info("STEP 8: Skipping Normalization (--no-normalize flag set)")
+        logger.info("=" * 80)
+        logger.info("Note: Normalization is enabled by default. Use --no-normalize to skip.")
 
     # Step 10: Verify final preprocessing state
     logger.info("\n" + "=" * 80)
