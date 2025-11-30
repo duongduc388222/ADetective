@@ -443,7 +443,7 @@ def parse_arguments():
     parser.add_argument("--freeze-layers", type=int, default=6, help="Number of layers to freeze (default: 6)")
     parser.add_argument("--warmup-steps", type=int, default=500, help="Warmup steps for scheduler (default: 500)")
     parser.add_argument("--patience", type=int, default=3, help="Early stopping patience (default: 3)")
-    parser.add_argument("--use-accelerate", action="store_true", default=True, help="Use Accelerate for distributed training (default: True)")
+    parser.add_argument("--use-accelerate", action="store_true", default=False, help="Use Accelerate for distributed training (default: False)")
     parser.add_argument("--no-accelerate", dest="use_accelerate", action="store_false", help="Disable Accelerate and use single GPU/CPU")
     return parser.parse_args()
 
