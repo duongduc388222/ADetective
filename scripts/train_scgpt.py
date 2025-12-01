@@ -234,6 +234,7 @@ class scGPTTrainer:
         model: torch.nn.Module,
         optimizer: torch.optim.Optimizer,
         scheduler: torch.optim.lr_scheduler.LRScheduler,
+        train_labels: np.ndarray,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         use_accelerate: bool = True,
     ):
@@ -266,7 +267,21 @@ class scGPTTrainer:
         else:
             self.device = device
 
-        self.criterion = torch.nn.BCEWithLogitsLoss()
+        # Calculate class weights for imbalanced dataset
+        pos_count = (train_labels == 1).sum()
+        neg_count = (train_labels == 0).sum()
+        pos_weight = torch.tensor([neg_count / pos_count], dtype=torch.float32)
+
+        logger.info(f"Class distribution: Positive={pos_count}, Negative={neg_count}")
+        logger.info(f"Positive class weight: {pos_weight.item():.4f}")
+
+        # Move pos_weight to correct device
+        if self.use_accelerate:
+            pos_weight = pos_weight.to(self.accelerator.device)
+        else:
+            pos_weight = pos_weight.to(device)
+
+        self.criterion = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight)
         self.best_val_loss = float("inf")
         self.patience_counter = 0
 
@@ -320,6 +335,17 @@ class scGPTTrainer:
                 preds = (logits > 0).float()
                 accuracy = (preds == labels).float().mean()
 
+                # Diagnostic logging for oscillating accuracy detection
+                if (batch_idx + 1) % 50 == 0:
+                    logit_stats = {
+                        'min': logits.min().item(),
+                        'max': logits.max().item(),
+                        'mean': logits.mean().item(),
+                        'std': logits.std().item()
+                    }
+                    pred_dist = preds.sum().item() / len(preds)
+                    label_dist = labels.sum().item() / len(labels)
+
             total_loss += loss.item()
             total_accuracy += accuracy.item()
             num_batches += 1
@@ -330,6 +356,11 @@ class scGPTTrainer:
                     logger.info(
                         f"Epoch {epoch} | Batch {batch_idx + 1}/{len(train_loader)} | "
                         f"Loss: {loss.item():.4f} | Acc: {accuracy.item():.4f}"
+                    )
+                    logger.info(
+                        f"  Logits: min={logit_stats['min']:.3f}, max={logit_stats['max']:.3f}, "
+                        f"mean={logit_stats['mean']:.3f}, std={logit_stats['std']:.3f} | "
+                        f"Pred class 1: {pred_dist:.2%} | True class 1: {label_dist:.2%}"
                     )
 
         avg_loss = total_loss / num_batches
@@ -543,6 +574,7 @@ def main():
         model=model,
         optimizer=optimizer,
         scheduler=scheduler,
+        train_labels=y_train,
         device=device,
         use_accelerate=args.use_accelerate,
     )
