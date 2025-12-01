@@ -313,7 +313,7 @@ class scGPTWrapper(nn.Module):
 
         return {
             "gene_ids": torch.tensor(gene_ids, dtype=torch.long),
-            "values": torch.tensor(binned_values, dtype=torch.long),
+            "values": torch.tensor(binned_values, dtype=torch.float),
             "padding_mask": torch.tensor(padding_mask),
         }
 
