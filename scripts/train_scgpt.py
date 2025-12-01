@@ -140,7 +140,8 @@ class scGPTDataset(torch.utils.data.Dataset):
     ):
         """Initialize dataset."""
         self.expression_data = expression_data
-        self.labels = torch.from_numpy(labels).long()
+        # Use torch.tensor() instead of torch.from_numpy() for NumPy 2.x compatibility
+        self.labels = torch.tensor(labels, dtype=torch.long)
         self.gene_names = gene_names
         self.scgpt_wrapper = scgpt_wrapper
         self.max_len = max_len
