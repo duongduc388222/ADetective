@@ -191,18 +191,29 @@ class scGPTWrapper(nn.Module):
     def _freeze_layers(self):
         """Freeze specified number of bottom transformer layers."""
         if self.freeze_layers > 0:
-            # Freeze embeddings
-            for param in self.transformer.embeddings.parameters():
+            # Freeze gene encoder (contains gene embedding layer)
+            for param in self.transformer.encoder.parameters():
                 param.requires_grad = False
 
-            # Freeze transformer layers
-            if hasattr(self.transformer, "encoder"):
-                layers = self.transformer.encoder.layers
-                for i in range(min(self.freeze_layers, len(layers))):
-                    for param in layers[i].parameters():
-                        param.requires_grad = False
+            # Freeze value encoder (expression value embeddings)
+            for param in self.transformer.value_encoder.parameters():
+                param.requires_grad = False
 
-            logger.info(f"Froze {self.freeze_layers} transformer layers and embeddings")
+            # Freeze batch encoder if it exists
+            if hasattr(self.transformer, "batch_encoder") and self.transformer.batch_encoder is not None:
+                for param in self.transformer.batch_encoder.parameters():
+                    param.requires_grad = False
+
+            # Freeze transformer encoder layers
+            if hasattr(self.transformer, "transformer_encoder"):
+                # Access layers through transformer_encoder, not encoder
+                if hasattr(self.transformer.transformer_encoder, "layers"):
+                    layers = self.transformer.transformer_encoder.layers
+                    for i in range(min(self.freeze_layers, len(layers))):
+                        for param in layers[i].parameters():
+                            param.requires_grad = False
+
+            logger.info(f"Froze {self.freeze_layers} transformer layers and all embedding encoders")
 
     def _load_pretrained_model(self, checkpoint_path: str):
         """Load pretrained scGPT model from checkpoint."""
