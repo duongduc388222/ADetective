@@ -66,6 +66,7 @@ Examples:
     parser.add_argument("--val-ratio", type=float, default=0.15, help="Fraction of donors for validation set (default: 0.15, increased from 0.1 for better stratification)")
     parser.add_argument("--test-ratio", type=float, default=0.15, help="Fraction of donors for test set (default: 0.15, decreased from 0.2 for better stratification)")
     parser.add_argument("--n-hvgs", type=int, default=2000, help="Number of highly variable genes to select (default: 2000)")
+    parser.add_argument("--min-cells", type=int, default=100, help="Minimum number of cells a gene must be expressed in (default: 100, set to 0 to skip)")
     parser.add_argument("--no-normalize", action="store_true", help="Skip normalization (library-size normalization + log1p transform)")
     parser.add_argument("--target-sum", type=float, default=1e4, help="Target sum for library-size normalization (default: 10000)")
     parser.add_argument("--min-label-ratio", type=float, default=0.3, help="Minimum ratio for minority class in each split (default: 0.3)")
@@ -136,9 +137,20 @@ def main():
         logger.error(f"Error details: {e}")
         return False
 
-    # Step 4: Create binary labels (High vs Not AD)
+    # Step 4: Filter genes (min_cells)
     logger.info("\n" + "=" * 80)
-    logger.info("STEP 4: Creating Binary Labels")
+    logger.info("STEP 4: Filtering Genes (min_cells)")
+    logger.info("=" * 80)
+    try:
+        adata = loader.filter_genes(min_cells=args.min_cells)
+    except Exception as e:
+        logger.error(f"Failed to filter genes: {e}")
+        logger.error(f"Error details: {e}")
+        return False
+
+    # Step 5: Create binary labels (High vs Not AD)
+    logger.info("\n" + "=" * 80)
+    logger.info("STEP 5: Creating Binary Labels")
     logger.info("=" * 80)
     try:
         adata, label_mapping = loader.create_labels()
@@ -147,9 +159,9 @@ def main():
         logger.error(f"Error details: {e}")
         return False
 
-    # Step 5: Check preprocessing state
+    # Step 6: Check preprocessing state
     logger.info("\n" + "=" * 80)
-    logger.info("STEP 5: Checking Preprocessing State")
+    logger.info("STEP 6: Checking Preprocessing State")
     logger.info("=" * 80)
     try:
         preprocess_info = loader.check_preprocessing_state(adata)
@@ -157,9 +169,9 @@ def main():
     except Exception as e:
         logger.warning(f"Could not check preprocessing state: {e}")
 
-    # Step 6: Get donor distribution
+    # Step 7: Get donor distribution
     logger.info("\n" + "=" * 80)
-    logger.info("STEP 6: Donor Distribution")
+    logger.info("STEP 7: Donor Distribution")
     logger.info("=" * 80)
     try:
         donor_info = loader.get_donor_info()
@@ -167,7 +179,7 @@ def main():
     except Exception as e:
         logger.warning(f"Could not retrieve donor info: {e}")
 
-    # Step 7: Create stratified splits (BEFORE normalization to prevent data leakage)
+    # Step 8: Create stratified splits (BEFORE normalization to prevent data leakage)
     logger.info("\n" + "=" * 80)
     logger.info("STEP 8: Creating Train/Val/Test Splits")
     logger.info("=" * 80)
@@ -182,10 +194,10 @@ def main():
         logger.error(f"Failed to create splits: {e}")
         return False
 
-    # Step 8: Normalize data (AFTER splitting, BEFORE HVG selection to prevent data leakage)
+    # Step 9: Normalize data (AFTER splitting, BEFORE HVG selection to prevent data leakage)
     if not args.no_normalize:
         logger.info("\n" + "=" * 80)
-        logger.info("STEP 8: Normalizing Data (After Split, Before HVG)")
+        logger.info("STEP 9: Normalizing Data (After Split, Before HVG)")
         logger.info("=" * 80)
         logger.info("ℹ️  Normalizing each split independently to prevent data leakage")
         try:
@@ -204,13 +216,13 @@ def main():
             return False
     else:
         logger.info("\n" + "=" * 80)
-        logger.info("STEP 8: Skipping Normalization (--no-normalize flag set)")
+        logger.info("STEP 9: Skipping Normalization (--no-normalize flag set)")
         logger.info("=" * 80)
         logger.info("Note: Normalization is enabled by default. Use --no-normalize to skip.")
 
-    # Step 9: Select HVGs (on NORMALIZED data, only on training data to prevent data leakage)
+    # Step 10: Select HVGs (on NORMALIZED data, only on training data to prevent data leakage)
     logger.info("\n" + "=" * 80)
-    logger.info("STEP 9: Selecting Highly Variable Genes")
+    logger.info("STEP 10: Selecting Highly Variable Genes")
     logger.info("=" * 80)
     try:
         # Select HVGs on normalized training data only
@@ -240,9 +252,9 @@ def main():
     except Exception as e:
         logger.warning(f"Could not select HVGs: {e}")
 
-    # Step 10: Verify final preprocessing state
+    # Step 11: Verify final preprocessing state
     logger.info("\n" + "=" * 80)
-    logger.info("STEP 10: Verifying Final Preprocessing State")
+    logger.info("STEP 11: Verifying Final Preprocessing State")
     logger.info("=" * 80)
     try:
         preprocess_info = loader.check_preprocessing_state(train_data)
@@ -250,9 +262,9 @@ def main():
     except Exception as e:
         logger.warning(f"Could not check preprocessing state: {e}")
 
-    # Step 11: Save processed data
+    # Step 12: Save processed data
     logger.info("\n" + "=" * 80)
-    logger.info("STEP 11: Saving Processed Data")
+    logger.info("STEP 12: Saving Processed Data")
     logger.info("=" * 80)
     try:
         train_path = str(output_dir / "train.h5ad")

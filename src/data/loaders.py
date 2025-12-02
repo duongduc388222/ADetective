@@ -158,6 +158,40 @@ class SEAADDataLoader:
         self.adata = adata_filtered
         return self.adata
 
+    def filter_genes(self, min_cells: int = 100) -> ad.AnnData:
+        """
+        Filter genes expressed in fewer than min_cells.
+
+        Removes genes that are expressed in very few cells, which tend to be noisy
+        and unreliable. This step should be done BEFORE normalization and HVG selection.
+
+        Args:
+            min_cells: Minimum number of cells a gene must be expressed in (default: 100)
+
+        Returns:
+            Filtered AnnData object with genes having min_cells expression
+        """
+        if self.adata is None:
+            self.load_raw_data()
+
+        if min_cells <= 0:
+            logger.info(f"Skipping gene filtering (min_cells={min_cells})")
+            return self.adata
+
+        import scanpy as sc
+
+        logger.info(f"Filtering genes (min_cells={min_cells})")
+        before_count = self.adata.n_vars
+
+        sc.pp.filter_genes(self.adata, min_cells=min_cells)
+
+        logger.info(f"Genes before filtering: {before_count:,}")
+        logger.info(f"Genes after filtering:  {self.adata.n_vars:,}")
+        logger.info(f"Genes removed: {before_count - self.adata.n_vars:,} ({100 * (before_count - self.adata.n_vars) / before_count:.1f}%)")
+        logger.info(f"✓ Gene filtering complete")
+
+        return self.adata
+
     def create_labels(
         self, exclude_categories: Optional[list] = None
     ) -> Tuple[ad.AnnData, Dict[str, int]]:
@@ -288,28 +322,95 @@ class SEAADDataLoader:
             .reset_index()
         )
         donor_labels.columns = [self.donor_column, "donor_label"]
+        # Ensure both columns are string type (not categorical) to avoid pandas stratification issues
+        donor_labels[self.donor_column] = donor_labels[self.donor_column].astype(str)
+        donor_labels["donor_label"] = donor_labels["donor_label"].astype(str)
 
         logger.info(f"Total unique donors: {len(donor_labels)}")
         logger.info(f"Donor-level label distribution:")
         logger.info(donor_labels["donor_label"].value_counts().to_dict())
 
-        # First split: train+val vs test
-        donors_train_val, donors_test = train_test_split(
-            donor_labels[self.donor_column],
-            test_size=test_ratio,
-            random_state=random_state,
-            stratify=donor_labels["donor_label"],
+        # NEW: Add cell count per donor for weighted stratification
+        donor_cell_counts = self.adata.obs.groupby(self.donor_column).size()
+        donor_labels["cell_count"] = donor_labels[self.donor_column].map(donor_cell_counts)
+
+        # NEW: Categorize donors by cell count (low/medium/high) to prevent imbalanced splits
+        # This ensures that when we stratify, we get a mix of high/low/medium cell count donors
+        # in each split, which leads to balanced cell-level label distributions
+        donor_labels["count_bucket"] = pd.qcut(
+            donor_labels["cell_count"],
+            q=3,
+            labels=["low", "med", "high"],
+            duplicates="drop",
+        ).astype(str)  # Convert to string to avoid categorical issues with train_test_split
+
+        # NEW: Create combined stratification key (e.g., "High_low", "High_med", "NotAD_high")
+        # This ensures stratification balances both donor labels AND cell count heterogeneity
+        donor_labels["strat_key"] = (
+            donor_labels["donor_label"].astype(str)
+            + "_"
+            + donor_labels["count_bucket"].astype(str)
         )
 
-        # Second split: train vs val
+        logger.info("\n📊 Cell count distribution per donor (weighted stratification):")
+        for label in donor_labels["donor_label"].unique():
+            label_data = donor_labels[donor_labels["donor_label"] == label]
+            logger.info(f"\n  {label} AD donors:")
+            for bucket in ["low", "med", "high"]:
+                bucket_data = label_data[label_data["count_bucket"] == bucket]
+                if len(bucket_data) > 0:
+                    avg_cells = bucket_data["cell_count"].mean()
+                    logger.info(
+                        f"    {bucket}: {len(bucket_data)} donors, avg {avg_cells:.0f} cells/donor"
+                    )
+
+        logger.info(f"\n📋 Stratification key distribution:")
+        logger.info(donor_labels["strat_key"].value_counts().to_dict())
+
+        # First split: train+val vs test (stratified by donor label AND cell count bucket)
+        try:
+            donors_train_val, donors_test = train_test_split(
+                donor_labels[self.donor_column],
+                test_size=test_ratio,
+                random_state=random_state,
+                stratify=donor_labels["strat_key"],
+            )
+        except ValueError as e:
+            # Fallback: if stratified split fails (e.g., insufficient samples in a stratum),
+            # fall back to stratifying by donor label only
+            logger.warning(
+                f"⚠️  Stratification by cell count bucket failed ({e}), "
+                "falling back to donor-label-only stratification"
+            )
+            donors_train_val, donors_test = train_test_split(
+                donor_labels[self.donor_column],
+                test_size=test_ratio,
+                random_state=random_state,
+                stratify=donor_labels["donor_label"],
+            )
+
+        # Second split: train vs val (stratified by donor label AND cell count bucket)
         val_size = val_ratio / (train_ratio + val_ratio)
         train_val_labels = donor_labels[donor_labels[self.donor_column].isin(donors_train_val)]
-        donors_train, donors_val = train_test_split(
-            train_val_labels[self.donor_column],
-            test_size=val_size,
-            random_state=random_state,
-            stratify=train_val_labels["donor_label"],
-        )
+        try:
+            donors_train, donors_val = train_test_split(
+                train_val_labels[self.donor_column],
+                test_size=val_size,
+                random_state=random_state,
+                stratify=train_val_labels["strat_key"],
+            )
+        except ValueError as e:
+            # Fallback: if stratified split fails, fall back to donor-label-only stratification
+            logger.warning(
+                f"⚠️  Stratification by cell count bucket failed ({e}), "
+                "falling back to donor-label-only stratification"
+            )
+            donors_train, donors_val = train_test_split(
+                train_val_labels[self.donor_column],
+                test_size=val_size,
+                random_state=random_state,
+                stratify=train_val_labels["donor_label"],
+            )
 
         # Create splits (loads each split into memory separately)
         logger.info("🔍 Creating train/val/test splits and loading into memory...")
