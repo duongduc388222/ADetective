@@ -182,13 +182,39 @@ def main():
         logger.error(f"Failed to create splits: {e}")
         return False
 
-    # Step 9: Select HVGs (only on training data to prevent data leakage)
+    # Step 8: Normalize data (AFTER splitting, BEFORE HVG selection to prevent data leakage)
+    if not args.no_normalize:
+        logger.info("\n" + "=" * 80)
+        logger.info("STEP 8: Normalizing Data (After Split, Before HVG)")
+        logger.info("=" * 80)
+        logger.info("ℹ️  Normalizing each split independently to prevent data leakage")
+        try:
+            logger.info("Normalizing training set...")
+            train_data = loader.normalize_data(train_data, target_sum=args.target_sum)
+
+            logger.info("Normalizing validation set...")
+            val_data = loader.normalize_data(val_data, target_sum=args.target_sum)
+
+            logger.info("Normalizing test set...")
+            test_data = loader.normalize_data(test_data, target_sum=args.target_sum)
+
+            logger.info("✓ All splits normalized independently")
+        except Exception as e:
+            logger.error(f"Failed to normalize data: {e}")
+            return False
+    else:
+        logger.info("\n" + "=" * 80)
+        logger.info("STEP 8: Skipping Normalization (--no-normalize flag set)")
+        logger.info("=" * 80)
+        logger.info("Note: Normalization is enabled by default. Use --no-normalize to skip.")
+
+    # Step 9: Select HVGs (on NORMALIZED data, only on training data to prevent data leakage)
     logger.info("\n" + "=" * 80)
     logger.info("STEP 9: Selecting Highly Variable Genes")
     logger.info("=" * 80)
     try:
-        # Select HVGs on training data only
-        logger.info(f"Selecting {args.n_hvgs} HVGs from training data...")
+        # Select HVGs on normalized training data only
+        logger.info(f"Selecting {args.n_hvgs} HVGs from normalized training data...")
         train_data = loader.select_hvgs(train_data, args.n_hvgs)
         hvg_genes = train_data.var_names.copy()
 
@@ -213,32 +239,6 @@ def main():
 
     except Exception as e:
         logger.warning(f"Could not select HVGs: {e}")
-
-    # Step 8: Normalize data (AFTER splitting to prevent data leakage)
-    if not args.no_normalize:
-        logger.info("\n" + "=" * 80)
-        logger.info("STEP 8: Normalizing Data (After Split)")
-        logger.info("=" * 80)
-        logger.info("ℹ️  Normalizing each split independently to prevent data leakage")
-        try:
-            logger.info("Normalizing training set...")
-            train_data = loader.normalize_data(train_data, target_sum=args.target_sum)
-
-            logger.info("Normalizing validation set...")
-            val_data = loader.normalize_data(val_data, target_sum=args.target_sum)
-
-            logger.info("Normalizing test set...")
-            test_data = loader.normalize_data(test_data, target_sum=args.target_sum)
-
-            logger.info("✓ All splits normalized independently")
-        except Exception as e:
-            logger.error(f"Failed to normalize data: {e}")
-            return False
-    else:
-        logger.info("\n" + "=" * 80)
-        logger.info("STEP 8: Skipping Normalization (--no-normalize flag set)")
-        logger.info("=" * 80)
-        logger.info("Note: Normalization is enabled by default. Use --no-normalize to skip.")
 
     # Step 10: Verify final preprocessing state
     logger.info("\n" + "=" * 80)

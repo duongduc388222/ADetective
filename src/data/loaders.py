@@ -419,7 +419,7 @@ class SEAADDataLoader:
         Normalize RNA-seq data to library size and log-transform.
 
         Performs library-size normalization (each cell to same total count)
-        followed by log1p transformation.
+        followed by log1p transformation. Tracks preprocessing steps in adata.uns.
 
         Args:
             adata: AnnData object
@@ -458,6 +458,13 @@ class SEAADDataLoader:
         logger.info(f"Final preprocessing state: normalized={final_state['is_normalized']}, "
                    f"log_transformed={final_state['is_log_transformed']}")
 
+        # Track preprocessing history in adata.uns
+        if 'preprocessing_history' not in adata.uns:
+            adata.uns['preprocessing_history'] = {}
+        adata.uns['preprocessing_history']['normalized'] = final_state['is_normalized']
+        adata.uns['preprocessing_history']['log_transformed'] = final_state['is_log_transformed']
+        adata.uns['preprocessing_history']['normalization_target'] = target_sum
+
         return adata
 
     def check_preprocessing_state(self, adata: ad.AnnData) -> Dict[str, Any]:
@@ -472,26 +479,43 @@ class SEAADDataLoader:
         """
         # Check for log transformation
         # Log-transformed data typically has:
-        # - Maximum values < 20 (since log1p(large_number) is relatively small)
+        # - 99th percentile < 15 (robust to outliers, since log1p(large_number) is relatively small)
+        # - Maximum values < 25 (allows for some biological variability between cell populations)
         # - Minimum values >= 0 (log1p never produces negative values)
         X_data = adata.X
         if hasattr(X_data, 'toarray'):
             # Handle sparse matrices
             max_val = X_data.max()
             min_val = X_data.min()
+            p99_val = np.percentile(X_data.toarray(), 99)
         else:
             max_val = np.max(X_data)
             min_val = np.min(X_data)
+            p99_val = np.percentile(X_data, 99)
 
-        is_log_transformed = (max_val < 20) and (min_val >= 0)
+        # Use percentile-based detection instead of max to be robust to outliers
+        is_log_transformed = (p99_val < 15) and (min_val >= 0) and (max_val < 25)
 
         # Check for normalization (library-size normalization)
         # Normalized data has row sums approximately equal to a constant
         row_sums = np.array(X_data.sum(axis=1)).flatten()
-        is_normalized = np.std(row_sums) / np.mean(row_sums) < 0.1  # CV < 10%
+        mean_row_sum = np.mean(row_sums)
+        std_row_sum = np.std(row_sums)
+        cv_row_sum = std_row_sum / mean_row_sum if mean_row_sum > 0 else float('inf')
+        is_normalized = cv_row_sum < 0.1  # CV < 10%
 
+        # Enhanced logging with diagnostic information
         logger.info(f"Log transformation status: {'Yes' if is_log_transformed else 'No'}")
+        logger.info(f"  Data shape: {X_data.shape}")
+        logger.info(f"  Min value: {min_val:.4f}")
+        logger.info(f"  Max value: {max_val:.4f}")
+        logger.info(f"  Mean value: {np.mean(X_data):.4f}")
+        logger.info(f"  99th percentile: {p99_val:.4f}")
+        logger.info(f"  Log checks: p99<15={p99_val<15}, min>=0={min_val>=0}, max<25={max_val<25}")
+
         logger.info(f"Normalization status: {'Yes' if is_normalized else 'No'}")
+        logger.info(f"  Row sum stats: mean={mean_row_sum:.2f}, std={std_row_sum:.2f}, CV={cv_row_sum:.4f}")
+        logger.info(f"  Normalization check: CV<0.1={cv_row_sum<0.1}")
 
         return {
             "is_log_transformed": is_log_transformed,
