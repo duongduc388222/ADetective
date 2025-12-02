@@ -286,6 +286,7 @@ class TransformerTrainer:
         config: Dict,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         use_accelerate: bool = True,
+        accelerator=None,
     ):
         """
         Initialize trainer.
@@ -295,23 +296,11 @@ class TransformerTrainer:
             config: Configuration dictionary (from YAML)
             device: Device to use ("cuda" or "cpu") - used if use_accelerate=False
             use_accelerate: Whether to use Accelerate library (default: True)
+            accelerator: Pre-initialized Accelerator instance with prepared components
         """
         self.model = model
         self.config = config
         self.use_accelerate = use_accelerate
-
-        # Initialize Accelerator
-        if self.use_accelerate:
-            self.accelerator = Accelerator()
-            logger.info(f"Initializing TransformerTrainer with Accelerate")
-            logger.info(f"  Device: {self.accelerator.device}")
-            logger.info(f"  Process index: {self.accelerator.process_index}")
-            logger.info(f"  Number of processes: {self.accelerator.num_processes}")
-        else:
-            self.accelerator = None
-            self.device = device
-            logger.info(f"Initializing TransformerTrainer on device: {device}")
-            self.model = self.model.to(device)
 
         # Create optimizer (before prepare)
         self.optimizer = self._create_optimizer()
@@ -319,12 +308,32 @@ class TransformerTrainer:
         # Create learning rate scheduler
         self.scheduler = self._create_scheduler()
 
-        # Prepare model, optimizer, and scheduler with Accelerate
+        # Initialize or use provided Accelerator
         if self.use_accelerate:
-            self.model, self.optimizer, self.scheduler = self.accelerator.prepare(
-                self.model, self.optimizer, self.scheduler
-            )
-            logger.info("Model, optimizer, and scheduler prepared with Accelerate")
+            if accelerator is not None:
+                # Use provided accelerator (already prepared everything)
+                self.accelerator = accelerator
+                logger.info(f"Using provided Accelerator instance")
+                logger.info(f"  Device: {self.accelerator.device}")
+                logger.info(f"  Process index: {self.accelerator.process_index}")
+                logger.info(f"  Number of processes: {self.accelerator.num_processes}")
+                # Model/optimizer/scheduler already prepared in main()
+            else:
+                # Fallback: create new accelerator and prepare here
+                self.accelerator = Accelerator()
+                logger.info(f"Created new Accelerator instance in trainer")
+                logger.info(f"  Device: {self.accelerator.device}")
+                logger.info(f"  Process index: {self.accelerator.process_index}")
+                logger.info(f"  Number of processes: {self.accelerator.num_processes}")
+                self.model, self.optimizer, self.scheduler = self.accelerator.prepare(
+                    self.model, self.optimizer, self.scheduler
+                )
+                logger.info("Model, optimizer, and scheduler prepared with Accelerate")
+        else:
+            self.accelerator = None
+            self.device = device
+            logger.info(f"Initializing TransformerTrainer on device: {device}")
+            self.model = self.model.to(device)
 
         # Loss function (binary classification with logits)
         self.criterion = nn.BCEWithLogitsLoss()

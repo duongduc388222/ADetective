@@ -212,11 +212,28 @@ def main():
     logger.info(f"Using device: {device}")
     logger.info(f"Using Accelerate: {args.use_accelerate}")
 
+    # Initialize Accelerator and prepare everything if using Accelerate
+    accelerator_instance = None
+    if args.use_accelerate:
+        logger.info("\n" + "=" * 80)
+        logger.info("Preparing Components with Accelerate")
+        logger.info("=" * 80)
+        from accelerate import Accelerator
+        accelerator_instance = Accelerator()
+        logger.info(f"Initialized Accelerator on device: {accelerator_instance.device}")
+
+        # Prepare ALL components together - this ensures dataloaders are on correct device
+        model, train_loader, val_loader, test_loader = accelerator_instance.prepare(
+            model, train_loader, val_loader, test_loader
+        )
+        logger.info("✓ Model and dataloaders prepared with Accelerate")
+
     trainer = MLPTrainer(
         model,
         config=training_config,
         device=device,
         use_accelerate=args.use_accelerate,
+        accelerator=accelerator_instance,
     )
 
     # Step 5: Train model

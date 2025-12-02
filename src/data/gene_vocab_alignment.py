@@ -233,8 +233,8 @@ class GeneVocabAligner:
                 "vocab_coverage": len(intersection) / len(self.scgpt_vocab) if len(self.scgpt_vocab) > 0 else 0.0,  # % scGPT vocab in dataset
             },
             "strategy": strategy,
-            "oov_gene_list": sorted(list(oov_genes))[:500],  # First 500 OOV genes
-            "intersection_gene_list": sorted(list(intersection))[:100],  # First 100 matched genes
+            "oov_gene_list": sorted(list(oov_genes))[:500],  
+            "intersection_gene_list": sorted(list(intersection))[:100],
             "gene_id_column_used": self.dataset_gene_id_column,
             "gene_symbol_column_used": self.dataset_gene_symbol_column,
         }
