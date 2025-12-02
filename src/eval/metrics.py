@@ -60,7 +60,7 @@ class ModelEvaluator:
         Generate predictions on a dataset.
 
         Args:
-            data_loader: DataLoader with (X, y) tuples
+            data_loader: DataLoader with either (X, y) tuples or dict format (for scGPT)
 
         Returns:
             Tuple of (predictions, probabilities, true_labels)
@@ -70,11 +70,27 @@ class ModelEvaluator:
         all_labels = []
 
         with torch.no_grad():
-            for X, y in data_loader:
-                X = X.to(self.device)
-                logits = self.model(X)
+            for batch in data_loader:
+                # Handle both tuple and dict formats
+                if isinstance(batch, dict):
+                    # scGPT format: dict with gene_ids, values, padding_mask, labels
+                    gene_ids = batch["gene_ids"].to(self.device)
+                    values = batch["values"].to(self.device)
+                    padding_mask = batch["padding_mask"].to(self.device)
+                    y = batch["labels"]
+                    logits = self.model(
+                        gene_ids=gene_ids,
+                        values=values,
+                        src_key_padding_mask=padding_mask,
+                    )
+                else:
+                    # Standard format: (X, y) tuple
+                    X, y = batch
+                    X = X.to(self.device)
+                    logits = self.model(X)
+
                 all_logits.append(logits.cpu().numpy())
-                all_labels.append(y.numpy())
+                all_labels.append(y.cpu().numpy() if hasattr(y, 'cpu') else y.numpy())
 
         logits = np.concatenate(all_logits, axis=0)
         labels = np.concatenate(all_labels, axis=0)
@@ -102,7 +118,7 @@ class ModelEvaluator:
         Evaluate model on a dataset and compute all metrics.
 
         Args:
-            data_loader: DataLoader with (X, y) tuples
+            data_loader: DataLoader with either (X, y) tuples or dict format (for scGPT)
             dataset_name: Name of dataset (for logging)
 
         Returns:
