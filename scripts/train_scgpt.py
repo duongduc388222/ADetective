@@ -237,35 +237,42 @@ class scGPTTrainer:
         train_labels: np.ndarray,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         use_accelerate: bool = True,
+        accelerator=None,
     ):
         """Initialize trainer."""
         self.use_accelerate = use_accelerate
 
-        # Initialize Accelerator
+        # Initialize or use provided Accelerator
         if self.use_accelerate:
-            self.accelerator = Accelerator()
-            logger.info(f"Initializing scGPTTrainer with Accelerate")
-            logger.info(f"  Device: {self.accelerator.device}")
-            logger.info(f"  Process index: {self.accelerator.process_index}")
-            logger.info(f"  Number of processes: {self.accelerator.num_processes}")
+            if accelerator is not None:
+                # Use provided accelerator (already prepared everything)
+                self.accelerator = accelerator
+                logger.info(f"Using provided Accelerator instance")
+                logger.info(f"  Device: {self.accelerator.device}")
+                logger.info(f"  Process index: {self.accelerator.process_index}")
+                logger.info(f"  Number of processes: {self.accelerator.num_processes}")
+                # Model/optimizer/scheduler already prepared in main()
+                self.model = model
+                self.optimizer = optimizer
+                self.scheduler = scheduler
+            else:
+                # Fallback: create new accelerator and prepare here
+                self.accelerator = Accelerator()
+                logger.info(f"Created new Accelerator instance in trainer")
+                logger.info(f"  Device: {self.accelerator.device}")
+                logger.info(f"  Process index: {self.accelerator.process_index}")
+                logger.info(f"  Number of processes: {self.accelerator.num_processes}")
+                self.model, self.optimizer, self.scheduler = self.accelerator.prepare(
+                    model, optimizer, scheduler
+                )
+                logger.info("Model, optimizer, and scheduler prepared with Accelerate")
         else:
             self.accelerator = None
             self.device = device
             logger.info(f"Initializing scGPTTrainer on device: {device}")
-            model = model.to(device)
-
-        self.model = model
-        self.optimizer = optimizer
-        self.scheduler = scheduler
-
-        # Prepare model, optimizer, and scheduler with Accelerate
-        if self.use_accelerate:
-            self.model, self.optimizer, self.scheduler = self.accelerator.prepare(
-                self.model, self.optimizer, self.scheduler
-            )
-            logger.info("Model, optimizer, and scheduler prepared with Accelerate")
-        else:
-            self.device = device
+            self.model = model.to(device)
+            self.optimizer = optimizer
+            self.scheduler = scheduler
 
         # Calculate class weights for imbalanced dataset
         pos_count = (train_labels == 1).sum()
@@ -570,6 +577,21 @@ def main():
     logger.info(f"Using device: {device}")
     logger.info(f"Using Accelerate: {args.use_accelerate}")
 
+    # Initialize Accelerator and prepare everything if using Accelerate
+    accelerator_instance = None
+    if args.use_accelerate:
+        logger.info("\n" + "=" * 80)
+        logger.info("Preparing Components with Accelerate")
+        logger.info("=" * 80)
+        accelerator_instance = Accelerator()
+        logger.info(f"Initialized Accelerator on device: {accelerator_instance.device}")
+
+        # Prepare ALL components together - this ensures dataloaders are on correct device
+        model, optimizer, scheduler, train_loader, val_loader, test_loader = accelerator_instance.prepare(
+            model, optimizer, scheduler, train_loader, val_loader, test_loader
+        )
+        logger.info("✓ Model, optimizer, scheduler, and dataloaders prepared with Accelerate")
+
     trainer = scGPTTrainer(
         model=model,
         optimizer=optimizer,
@@ -577,6 +599,7 @@ def main():
         train_labels=y_train,
         device=device,
         use_accelerate=args.use_accelerate,
+        accelerator=accelerator_instance,
     )
 
     # Step 5: Fine-tune model
