@@ -149,7 +149,7 @@ def parse_arguments():
     parser.add_argument("--output-dir", type=str, default="./results/transformer", help="Directory to save results and checkpoint")
     parser.add_argument("--batch-size", type=int, default=32, help="Batch size for training (default: 32)")
     parser.add_argument("--learning-rate", type=float, default=1e-4, help="Learning rate for AdamW optimizer (default: 1e-4)")
-    parser.add_argument("--epochs", type=int, default=30, help="Number of training epochs (default: 30)")
+    parser.add_argument("--epochs", type=int, default=15, help="Number of training epochs (default: 15)")
     parser.add_argument("--weight-decay", type=float, default=1e-4, help="Weight decay for regularization (default: 1e-4)")
     parser.add_argument("--d-model", type=int, default=128, help="Model dimension (default: 128)")
     parser.add_argument("--nhead", type=int, default=8, help="Number of attention heads (default: 8)")
@@ -226,9 +226,19 @@ def main():
     # Calculate class weights for imbalanced dataset
     pos_count = (y_train == 1).sum()
     neg_count = (y_train == 0).sum()
-    pos_weight = torch.tensor([neg_count / pos_count], dtype=torch.float32)
-    logger.info(f"Class distribution: Negative={neg_count}, Positive={pos_count}")
-    logger.info(f"Positive class weight: {pos_weight.item():.4f}")
+    total = pos_count + neg_count
+    pos_ratio = pos_count / total
+    neg_ratio = neg_count / total
+    logger.info(f"Class distribution: Negative={neg_count} ({neg_ratio*100:.1f}%), Positive={pos_count} ({pos_ratio*100:.1f}%)")
+
+    # Only use pos_weight if NEGATIVE class is more frequent
+    # Currently positive class is majority (73%), so don't use pos_weight to avoid down-weighting the majority
+    pos_weight = None  # Let model learn naturally from the data distribution
+    if neg_count > pos_count:
+        pos_weight = torch.tensor([neg_count / pos_count], dtype=torch.float32)
+        logger.info(f"Using pos_weight = {pos_weight.item():.4f} to up-weight minority positive class")
+    else:
+        logger.info(f"Positive class is majority ({pos_ratio*100:.1f}%) - not using pos_weight")
 
     # Step 4: Create trainer
     logger.info("\n" + "=" * 80)
