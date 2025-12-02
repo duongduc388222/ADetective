@@ -79,9 +79,17 @@ class ModelEvaluator:
         logits = np.concatenate(all_logits, axis=0)
         labels = np.concatenate(all_labels, axis=0)
 
-        # Predictions and probabilities
-        preds = np.argmax(logits, axis=1)
-        probs = np.exp(logits) / np.exp(logits).sum(axis=1, keepdims=True)  # Softmax
+        # Handle both binary (shape: N,1) and multiclass (shape: N,2+) outputs
+        if logits.shape[1] == 1:
+            # Binary classification: use sigmoid
+            probs_positive = 1 / (1 + np.exp(-logits.flatten()))  # Sigmoid
+            preds = (probs_positive > 0.5).astype(int)
+            # Create 2-column probs array: [P(class 0), P(class 1)]
+            probs = np.column_stack([1 - probs_positive, probs_positive])
+        else:
+            # Multiclass: use softmax
+            preds = np.argmax(logits, axis=1)
+            probs = np.exp(logits) / np.exp(logits).sum(axis=1, keepdims=True)  # Softmax
 
         return preds, probs, labels
 
