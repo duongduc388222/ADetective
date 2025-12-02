@@ -143,6 +143,7 @@ class MLPTrainer:
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         use_accelerate: bool = True,
         accelerator=None,
+        class_weights: Optional[torch.Tensor] = None,
     ):
         """
         Initialize trainer.
@@ -153,6 +154,7 @@ class MLPTrainer:
             device: Device to use ("cuda" or "cpu") - used if use_accelerate=False
             use_accelerate: Whether to use Accelerate library (default: True)
             accelerator: Pre-initialized Accelerator instance with prepared components
+            class_weights: Class weights for imbalanced datasets (optional)
         """
         self.model = model
         self.config = config
@@ -191,8 +193,12 @@ class MLPTrainer:
             logger.info(f"Initializing MLPTrainer on device: {device}")
             self.model = self.model.to(device)
 
-        # Loss function
-        self.criterion = nn.CrossEntropyLoss()
+        # Loss function with optional class weights
+        if class_weights is not None:
+            class_weights = class_weights.to(device if not use_accelerate else self.accelerator.device)
+            self.criterion = nn.CrossEntropyLoss(weight=class_weights)
+        else:
+            self.criterion = nn.CrossEntropyLoss()
 
         # Tracking
         self.best_val_loss = float("inf")

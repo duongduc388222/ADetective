@@ -287,6 +287,7 @@ class TransformerTrainer:
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         use_accelerate: bool = True,
         accelerator=None,
+        pos_weight: Optional[torch.Tensor] = None,
     ):
         """
         Initialize trainer.
@@ -297,6 +298,7 @@ class TransformerTrainer:
             device: Device to use ("cuda" or "cpu") - used if use_accelerate=False
             use_accelerate: Whether to use Accelerate library (default: True)
             accelerator: Pre-initialized Accelerator instance with prepared components
+            pos_weight: Positive class weight for imbalanced datasets (optional)
         """
         self.model = model
         self.config = config
@@ -335,8 +337,12 @@ class TransformerTrainer:
             logger.info(f"Initializing TransformerTrainer on device: {device}")
             self.model = self.model.to(device)
 
-        # Loss function (binary classification with logits)
-        self.criterion = nn.BCEWithLogitsLoss()
+        # Loss function (binary classification with logits) with optional pos_weight
+        if pos_weight is not None:
+            pos_weight = pos_weight.to(device if not use_accelerate else self.accelerator.device)
+            self.criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        else:
+            self.criterion = nn.BCEWithLogitsLoss()
 
         # Tracking
         self.best_val_loss = float("inf")

@@ -223,6 +223,13 @@ def main():
 
     logger.info(f"Model created with {sum(p.numel() for p in model.parameters()):,} parameters")
 
+    # Calculate class weights for imbalanced dataset
+    pos_count = (y_train == 1).sum()
+    neg_count = (y_train == 0).sum()
+    pos_weight = torch.tensor([neg_count / pos_count], dtype=torch.float32)
+    logger.info(f"Class distribution: Negative={neg_count}, Positive={pos_count}")
+    logger.info(f"Positive class weight: {pos_weight.item():.4f}")
+
     # Step 4: Create trainer
     logger.info("\n" + "=" * 80)
     logger.info("STEP 4: Creating Trainer")
@@ -267,6 +274,7 @@ def main():
         device=device,
         use_accelerate=args.use_accelerate,
         accelerator=accelerator_instance,
+        pos_weight=pos_weight,
     )
 
     # Step 5: Train model
