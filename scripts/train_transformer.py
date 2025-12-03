@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.models.transformer import FlashTransformer, TransformerTrainer
 from src.eval.metrics import ModelEvaluator
+from src.data.metadata_processor import MetadataProcessor
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,8 +34,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def load_data(data_dir: Path) -> tuple:
-    """Load preprocessed h5ad files from Phase 2."""
+def load_data(data_dir: Path, use_metadata: bool = False, output_dir: Path = None) -> tuple:
+    """Load preprocessed h5ad files from Phase 2, optionally with metadata."""
     logger.info(f"Loading preprocessed data from {data_dir}")
 
     train_path = data_dir / "train.h5ad"
@@ -75,9 +76,52 @@ def load_data(data_dir: Path) -> tuple:
     X_test = to_dense_array(test_data.X)
     y_test = test_data.obs["label"].values.astype(np.int64)
 
-    logger.info(f"Train: {X_train.shape}, {y_train.shape}")
-    logger.info(f"Val:   {X_val.shape}, {y_val.shape}")
-    logger.info(f"Test:  {X_test.shape}, {y_test.shape}")
+    logger.info(f"Gene expression shapes:")
+    logger.info(f"  Train: {X_train.shape}, {y_train.shape}")
+    logger.info(f"  Val:   {X_val.shape}, {y_val.shape}")
+    logger.info(f"  Test:  {X_test.shape}, {y_test.shape}")
+
+    # Extract and concatenate metadata if requested
+    if use_metadata:
+        logger.info("\n" + "=" * 80)
+        logger.info("METADATA INTEGRATION")
+        logger.info("=" * 80)
+
+        metadata_processor = MetadataProcessor()
+        X_train_meta = metadata_processor.fit_transform(train_data.obs)
+        X_val_meta = metadata_processor.transform(val_data.obs)
+        X_test_meta = metadata_processor.transform(test_data.obs)
+
+        # Log metadata information
+        metadata_features = metadata_processor.get_feature_names()
+        logger.info(f"Extracted {len(metadata_features)} metadata features:")
+        for i, feat in enumerate(metadata_features):
+            logger.info(f"  {i+1}. {feat}")
+
+        # Concatenate gene expression + metadata
+        X_train = np.concatenate([X_train, X_train_meta], axis=1)
+        X_val = np.concatenate([X_val, X_val_meta], axis=1)
+        X_test = np.concatenate([X_test, X_test_meta], axis=1)
+
+        logger.info(f"\nCombined feature shapes:")
+        logger.info(f"  Train: {X_train.shape} (genes: 2000, metadata: {X_train_meta.shape[1]})")
+        logger.info(f"  Val:   {X_val.shape}")
+        logger.info(f"  Test:  {X_test.shape}")
+
+        # Save metadata processor state
+        if output_dir:
+            output_dir = Path(output_dir)
+            metadata_processor.save(output_dir / "metadata_processor.pkl")
+
+            # Save metadata feature names
+            metadata_info = {
+                "metadata_dim": len(metadata_features),
+                "feature_names": metadata_features,
+            }
+            with open(output_dir / "metadata_features.json", "w") as f:
+                json.dump(metadata_info, f, indent=2)
+            logger.info(f"Saved metadata processor to {output_dir / 'metadata_processor.pkl'}")
+            logger.info(f"Saved metadata feature names to {output_dir / 'metadata_features.json'}")
 
     return X_train, y_train, X_val, y_val, X_test, y_test
 
@@ -159,6 +203,7 @@ def parse_arguments():
     parser.add_argument("--gradient-clip", type=float, default=1.0, help="Gradient clipping value (default: 1.0)")
     parser.add_argument("--patience", type=int, default=10, help="Early stopping patience (default: 10)")
     parser.add_argument("--expression-scaling", type=str, default="multiplicative", choices=["multiplicative", "additive", "concatenate"], help="Expression scaling method")
+    parser.add_argument("--use-metadata", action="store_true", default=False, help="Include donor metadata as additional features (default: False)")
     parser.add_argument("--use-accelerate", action="store_true", default=False, help="Use Accelerate for distributed training (default: False)")
     parser.add_argument("--no-accelerate", dest="use_accelerate", action="store_false", help="Disable Accelerate and use single GPU/CPU")
     return parser.parse_args()
@@ -177,6 +222,13 @@ def main():
 
     logger.info(f"\nData directory: {data_dir}")
     logger.info(f"Output directory: {output_dir}")
+    logger.info(f"Hyperparameters:")
+    logger.info(f"  Batch size: {args.batch_size}")
+    logger.info(f"  Learning rate: {args.learning_rate}")
+    logger.info(f"  Epochs: {args.epochs}")
+    logger.info(f"  D-model: {args.d_model}")
+    logger.info(f"  Num heads: {args.nhead}")
+    logger.info(f"  Use metadata: {args.use_metadata}")
 
     # Step 0: Check Flash Attention
     logger.info("\n" + "=" * 80)
@@ -189,7 +241,9 @@ def main():
     logger.info("STEP 1: Loading Preprocessed Data")
     logger.info("=" * 80)
     try:
-        X_train, y_train, X_val, y_val, X_test, y_test = load_data(data_dir)
+        X_train, y_train, X_val, y_val, X_test, y_test = load_data(
+            data_dir, use_metadata=args.use_metadata, output_dir=output_dir
+        )
     except FileNotFoundError as e:
         logger.error(f"Error loading data: {e}")
         logger.error("Make sure you've run scripts/load.py and scripts/prepare_data.py first")
