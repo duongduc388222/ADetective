@@ -49,22 +49,22 @@ class MetadataProcessor:
         """
         logger.info("Fitting metadata processor on training data...")
 
-        # Define feature groups based on plan
+        # Define feature groups based on actual h5ad column names
+        # NOTE: Removed Library Prep (79 batch categories - high dimensional noise)
+        # and Sequencing Method (batch effect, not biological signal)
         self.categorical_features = {
-            "APOE Genotype": "APOE",  # 4 categories: 2/3, 3/3, 3/4, 4/4
-            "Sex": "sex",  # Female, Male
-            "Cognitive Status": "cogstatus",  # Dementia, No dementia
-            "Sequencing Method": "Method",  # Batch variable
-            "Library Prep": "library_prep",  # Batch variable
+            "APOE Genotype": "APOE Genotype",  # Genetic risk factor for AD
+            "Sex": "Sex",  # Sex-specific AD patterns
+            "Cognitive Status": "Cognitive Status",  # Directly related to AD diagnosis
         }
 
         self.continuous_features = {
-            "Age at Death": "Age_at_death",
-            "Years of Education": "education_years",
-            "Amyloid (6E10+)": "percent_6e10_positive_area",
-            "Tau (AT8+)": "percent_AT8_positive_area",
-            "GFAP (Astrocytes)": "percent_GFAP_positive_area",
-            "Alpha-Synuclein": "percent_aSyn_positive_area",
+            "Age at Death": "Age at Death",
+            "Years of Education": "Years of education",
+            "Amyloid (6E10+)": "percent 6e10 positive area",
+            "Tau (AT8+)": "percent AT8 positive area",
+            "GFAP (Astrocytes)": "percent GFAP positive area",
+            "Alpha-Synuclein": "percent aSyn positive area",
             "PMI (QC)": "PMI",
         }
 
@@ -94,9 +94,9 @@ class MetadataProcessor:
             else:
                 logger.warning(f"  {feature_name} ({col_name}): NOT FOUND in metadata")
 
-        # Stack and fit scaler
+        # Stack and fit scaler (stack columns, not rows)
         if continuous_data:
-            all_continuous = np.vstack(continuous_data)
+            all_continuous = np.hstack(continuous_data)
             self.scaler = StandardScaler()
             self.scaler.fit(all_continuous)
 
