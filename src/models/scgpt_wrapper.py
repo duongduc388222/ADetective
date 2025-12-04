@@ -218,7 +218,10 @@ class scGPTWrapper(nn.Module):
             logger.info(f"Froze {self.freeze_layers} transformer layers and all embedding encoders")
 
     def _load_pretrained_model(self, checkpoint_path: str):
-        """Load pretrained scGPT model from checkpoint."""
+        """Load pretrained scGPT model from checkpoint.
+
+        Handles vocabulary size mismatches by resizing embedding layers if needed.
+        """
         logger.info(f"Loading pretrained scGPT from {checkpoint_path}")
 
         try:
@@ -237,24 +240,55 @@ class scGPTWrapper(nn.Module):
                 k.replace("module.", ""): v for k, v in model_state.items()
             }
 
+            # Handle vocabulary size mismatches in embedding layers
+            # The checkpoint may have a different vocabulary size than the current model
+            current_vocab_size = self.transformer.encoder.embedding.weight.shape[0]
+            checkpoint_vocab_size = model_state.get("encoder.embedding.weight", torch.tensor([])).shape[0] if "encoder.embedding.weight" in model_state else current_vocab_size
+
+            if checkpoint_vocab_size != current_vocab_size:
+                logger.info(f"Vocabulary size mismatch: checkpoint={checkpoint_vocab_size}, current={current_vocab_size}")
+                logger.info(f"  Resizing embedding layers to match checkpoint...")
+
+                # Resize embedding layers to match checkpoint
+                if "encoder.embedding.weight" in model_state:
+                    checkpoint_emb = model_state["encoder.embedding.weight"]
+                    current_emb = self.transformer.encoder.embedding.weight
+
+                    if checkpoint_emb.shape[0] < current_emb.shape[0]:
+                        # Checkpoint is smaller - pad with random initialization
+                        logger.info(f"  Padding: {checkpoint_emb.shape[0]} -> {current_emb.shape[0]} genes")
+                        padded_emb = current_emb.clone()
+                        padded_emb[:checkpoint_emb.shape[0], :] = checkpoint_emb
+                        model_state["encoder.embedding.weight"] = padded_emb
+                    elif checkpoint_emb.shape[0] > current_emb.shape[0]:
+                        # Checkpoint is larger - truncate to match
+                        logger.info(f"  Truncating: {checkpoint_emb.shape[0]} -> {current_emb.shape[0]} genes")
+                        model_state["encoder.embedding.weight"] = checkpoint_emb[:current_emb.shape[0], :]
+
             # Load weights with strict=False to allow missing classifier head
             missing_keys, unexpected_keys = self.transformer.load_state_dict(
                 model_state, strict=False
             )
 
-            logger.info("Pretrained weights loaded successfully")
+            logger.info("✓ Pretrained weights loaded successfully")
             if missing_keys:
-                logger.info(f"Missing keys (expected): {missing_keys[:5]}")
+                # Filter out expected missing keys (classification head, etc)
+                expected_missing = [k for k in missing_keys if 'cls' in k.lower() or 'classifier' in k.lower()]
+                unexpected_missing = [k for k in missing_keys if k not in expected_missing]
+                if unexpected_missing:
+                    logger.warning(f"  Unexpected missing keys: {unexpected_missing[:5]}")
             if unexpected_keys:
-                logger.info(f"Unexpected keys: {unexpected_keys[:5]}")
+                logger.info(f"  Unexpected keys: {unexpected_keys[:5]}")
 
             # Load vocabulary if present in checkpoint
             if "vocab" in checkpoint:
                 self.gene_vocab = checkpoint["vocab"]
-                logger.info(f"Loaded vocabulary with {len(self.gene_vocab)} genes")
+                logger.info(f"  Loaded vocabulary with {len(self.gene_vocab)} genes")
 
         except Exception as e:
             logger.error(f"Failed to load pretrained model: {e}")
+            import traceback
+            traceback.print_exc()
             raise
 
     def tokenize_and_pad_batch(
