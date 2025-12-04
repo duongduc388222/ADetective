@@ -17,9 +17,14 @@ Binary classification of Alzheimer's Disease neuropathology (High vs Not AD) usi
 
 This project implements three complementary deep learning approaches for classifying AD pathology in oligodendrocytes:
 
-1. **MLP Baseline** (Phase 3): Simple multi-layer perceptron with batch normalization and dropout
+1. **MLP Baseline** (Phase 3): Multi-layer perceptron with batch normalization and dropout
+   - **Without metadata**: 58.8% accuracy, 0.608 ROC-AUC (overfitting issues)
+   - **With metadata**: **95.6% accuracy, 0.995 ROC-AUC** ⭐ (BEST PERFORMER)
 2. **Custom Transformer** (Phase 4): Gene-as-sequence transformer with Flash Attention support
-3. **scGPT Fine-tuning** (Phase 5): Leveraging a pretrained foundation model with 33M cell pre-training
+   - Without metadata: 58.6% accuracy, 0.530 ROC-AUC (degenerate classifier)
+   - With metadata: 58.6% accuracy, 1.0 ROC-AUC (suspicious perfect AUC, not learning)
+3. **scGPT Fine-tuning** (Phase 5): Pretrained foundation model with 33M cell pre-training
+   - Accuracy: 49.3% (worse than random), ROC-AUC: 0.572 (vocabulary mismatch issue)
 
 ## Dataset
 
@@ -358,30 +363,54 @@ random_seed: 42
 
 ### MLP Baseline
 
-**Purpose**: Simple baseline for comparison
+**Purpose**: Efficient baseline model for AD classification (BEST PERFORMER with metadata)
 
 **Architecture**:
 ```
-Input (2000) → BN → 512 → ReLU → Dropout(0.3)
-            → BN → 256 → ReLU → Dropout(0.3)
-            → BN → 128 → ReLU → Dropout(0.3)
-            → Linear(1) → Sigmoid
+Input features (2000 genes or 2015 with metadata)
+    ↓
+Batch Norm → Hidden(512, ReLU, Dropout 0.3)
+    ↓
+Batch Norm → Hidden(256, ReLU, Dropout 0.3)
+    ↓
+Batch Norm → Hidden(128, ReLU, Dropout 0.3)
+    ↓
+Linear(1) → Sigmoid
 ```
 
+**Parameters**: ~1.3M parameters
+
 **Hyperparameters**:
-- Batch size: 32-64
-- Learning rate: 1e-3
-- Optimizer: AdamW
+- Batch size: 64
+- Learning rate: 1e-3 (AdamW)
 - Loss: BCEWithLogitsLoss
 - Early stopping: patience=10
+- Epochs: 10
 
-**File**: `src/models/mlp.py:338`
+**Actual Performance Results**:
+
+| Configuration | Accuracy | Precision | Recall | F1 | ROC-AUC | Status |
+|---|---|---|---|---|---|---|
+| Without metadata | 58.8% | 59.6% | 91.8% | 0.723 | 0.608 | ❌ Overfitting |
+| **With metadata** | **95.6%** | **97.9%** | **94.6%** | **0.962** | **0.995** | ✅ **BEST** |
+
+**Metadata Features** (when `--use-metadata` flag enabled):
+- Age at Death (normalized around 80)
+- Sex (Female=1, Male=0)
+- APOE4 allele count (0, 1, or 2)
+
+**Training Characteristics**:
+- **Without metadata**: Severe overfitting (train acc ~99.5% vs val acc ~66%)
+- **With metadata**: Excellent generalization (stable train-val gap ~28%)
+- **Key insight**: Clinical metadata (especially APOE4) is extremely predictive
+
+**File**: `src/models/mlp.py`
 
 **Training time**: ~5-10 min (T4 GPU)
 
 ### Custom Transformer
 
-**Purpose**: Capture gene-gene interactions and gene importance
+**Purpose**: Capture gene-gene interactions via self-attention (NOT RECOMMENDED - see results)
 
 **Novel Design**:
 - Treats each gene as a sequence token
@@ -391,62 +420,138 @@ Input (2000) → BN → 512 → ReLU → Dropout(0.3)
 
 **Architecture**:
 ```
-Expression vector [2000]
+Expression vector [2000 genes]
     ↓
-Gene embeddings × scaled by expression [2000, 128]
+Gene embeddings [2000, d_model=128]
+    ↓
+Expression scaling: embeddings × normalized_expression
     ↓
 [CLS] token prepended [2001, 128]
     ↓
-3 × Transformer layers (8 heads, d_model=128, ff_dim=256)
+3 × Transformer layers:
+  - 8 attention heads
+  - d_model = 128
+  - ff_dim = 256
+  - Flash Attention (PyTorch 2.0)
     ↓
-CLS output [128]
+CLS output pooling [128]
     ↓
 Classification head: LayerNorm → Linear(64) → GELU → Linear(1)
 ```
 
-**Key Features**:
-- Flash Attention via PyTorch 2.0 (automatic, transparent)
-- Pre-norm architecture for stability
-- Gradient checkpointing to save memory
-- Attention weight visualization for interpretability
+**Parameters**: ~300K parameters
 
-**Hyperparameters**:
-- Batch size: 32
-- Learning rate: 1e-4
-- Optimizer: AdamW
-- Loss: BCEWithLogitsLoss
-- Early stopping: patience=10
+**Actual Performance Results**:
 
-**File**: `src/models/transformer.py:521`
+| Configuration | Accuracy | Precision | Recall | F1 | ROC-AUC | Status |
+|---|---|---|---|---|---|---|
+| Without metadata | 58.6% | 58.6% | 100% | 0.739 | 0.530 | ❌ **Degenerate** |
+| With metadata | 58.6% | 58.6% | 100% | 0.739 | 1.0 | ⚠️ **Suspicious** |
+
+**Critical Issues Identified**:
+1. **Degenerate Classifier**: Predicts ALL samples as positive (100% recall)
+   - Precision = Accuracy = 58.6% means predictions match random chance
+   - Not learning meaningful patterns
+2. **Transformer Unsuitability**: Attention mechanisms designed for sequences (time-series, text)
+   - Gene expression is tabular data, not sequential
+   - Positional encoding is meaningless for genes
+3. **Perfect ROC-AUC with Metadata**: AUC=1.0 contradicts 58.6% accuracy
+   - Likely metric computation bug or probability miscalibration
+   - Suspicious result suggesting model is not learning
+
+**Why It Failed**:
+- Too small dataset for transformer (needs 100K+ samples to leverage attention)
+- Architecture mismatch: self-attention not needed for independent gene features
+- Model converged to trivial solution (always predict positive)
+
+**Recommendation**: Use MLP instead for tabular gene expression data
+
+**File**: `src/models/transformer.py`
 
 **Training time**: ~10-15 min (T4 GPU)
 
 ### scGPT Fine-tuning
 
-**Purpose**: Leverage large-scale pre-training on 33M cells
+**Purpose**: Leverage 33M cell pre-training (FAILED - vocabulary mismatch)
 
 **Foundation Model**:
-- Pre-trained on diverse tissues (brain, immune, gut, etc.)
-- 12 transformer layers, 512 dimensions, 8 heads
-- ~120M parameters
+- Pre-trained on 33M cells across diverse tissues (brain, immune, gut, etc.)
+- 12 transformer layers, d_model=512, 8 attention heads
+- ~120M parameters (frozen 9 layers, trainable 3)
 - Masked gene expression prediction objective
-
-**Fine-tuning Strategy**:
-- Freeze layers 0-5 (preserve general knowledge)
-- Train layers 6-11 + classification head
-- Gene vocabulary alignment (91-95% overlap typically)
 - Expression binned into 51 discrete tokens
 
-**Hyperparameters**:
-- Batch size: 16 (smaller due to model size)
-- Learning rate: 1e-5 (very low for pretrained)
+**Fine-tuning Configuration**:
+- Freeze bottom 9 layers (preserve general knowledge)
+- Train top 3 layers + classification head
+- Gene vocabulary alignment (CRITICAL BOTTLENECK)
+
+**Actual Performance Results**:
+
+| Metric | Value | Status |
+|---|---|---|
+| Test Accuracy | 49.3% | ❌ **Worse than random** |
+| Precision | 66.4% | Medium (only when very confident) |
+| Recall | 27.3% | ❌ **Misses 73% of AD cases** |
+| F1 | 0.387 | Poor |
+| ROC-AUC | 0.572 | Barely above random (0.5) |
+
+**Training Hyperparameters**:
+- Batch size: 8
+- Learning rate: 1e-05 (very low for pretrained)
 - Optimizer: AdamW
 - Loss: BCEWithLogitsLoss
-- Early stopping: patience=3 (early convergence expected)
+- Early stopping: patience=5
+- Epochs: 3 (converges quickly)
+- Warmup steps: 400
+- Eval metric: F1 score
 
-**File**: `src/models/scgpt_wrapper.py:100`
+**Critical Issues**:
 
-**Training time**: ~15-20 min (T4 GPU, 16GB VRAM)
+1. **Gene Vocabulary Mismatch (31% genes missing)**:
+   ```
+   Pretrained vocab:  60,699 genes
+   Dataset genes:      2,000
+   In vocabulary:      1,377 (68.9% coverage) ✓
+   NOT in vocabulary:    623 (31.1%) ✗ PROBLEM!
+   ```
+   - 31% of genes have no pretrained embeddings
+   - Random or zero initialization for missing genes
+   - 31% information loss at input → pretrained knowledge fails
+
+2. **Conservative Fine-tuning** (froze 9/12 layers):
+   - Cannot adapt quickly to dataset specifics
+   - Very low learning rate (1e-05) prevents adjustment
+   - Only 3 epochs training
+   - Model gets stuck in poor local minimum
+
+3. **Domain Shift**:
+   - Pretrained on general tissues (not brain-specific)
+   - Fine-tuned on AD-specific oligodendrocytes
+   - Biomedical transfer learning limited by distribution gap
+
+4. **Imbalanced Predictions**:
+   - Model too conservative predicting AD
+   - Misses 73% of positive cases (low recall)
+   - Only confident on ~27% of actual AD cases
+
+**Training History** (3 epochs):
+```
+Epoch 1: train_loss=0.359, val_acc=56.4%, val_f1=0.607
+Epoch 2: train_loss=0.317, val_acc=62.6%, val_f1=0.683
+Epoch 3: train_loss=0.309, val_acc=64.6%, val_f1=0.708
+Test:    accuracy=49.3%, f1=0.387 ← Validation-test gap indicates overfitting
+```
+
+**Why It Failed**:
+- Vocabulary coverage <70% makes pretrained weights unreliable
+- Small dataset cannot overcome 31% information loss
+- Conservative fine-tuning insufficient for domain adaptation
+- Transformer needs massive dataset to leverage pretrained knowledge
+
+**File**: `src/models/scgpt_wrapper.py`
+
+**Training time**: ~15-20 min (T4 GPU)
 
 ## Google Colab Guide
 
