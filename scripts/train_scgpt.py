@@ -614,6 +614,17 @@ def main():
             logger.info(f"  Loaded pretrained vocabulary from: {args.vocab_path}")
         else:
             logger.info("  Created vocabulary from dataset genes")
+
+        # Report gene vocabulary coverage
+        genes_in_vocab = sum(1 for g in gene_names if g in model.gene_vocab)
+        vocab_coverage = genes_in_vocab / len(gene_names) if len(gene_names) > 0 else 0.0
+        logger.info(f"\nGene vocabulary coverage:")
+        logger.info(f"  Genes in vocabulary: {genes_in_vocab}/{len(gene_names)} ({vocab_coverage:.1%})")
+        logger.info(f"  Total vocabulary size: {len(model.gene_vocab)} genes")
+        if vocab_coverage < 0.5:
+            logger.warning(f"  ⚠️  Low vocabulary coverage ({vocab_coverage:.1%}). Consider retraining vocabulary.")
+        elif vocab_coverage < 0.8:
+            logger.warning(f"  ⚠️  Moderate vocabulary coverage ({vocab_coverage:.1%}). Some genes will be filtered.")
     except ImportError as e:
         logger.error(f"Failed to initialize scGPT: {e}")
         logger.error("Install scGPT with: pip install scgpt")
@@ -712,6 +723,10 @@ def main():
     logger.info("STEP 7: Saving Results")
     logger.info("=" * 80)
 
+    # Calculate gene vocabulary coverage
+    genes_in_vocab = sum(1 for g in gene_names if g in model.gene_vocab)
+    vocab_coverage = genes_in_vocab / len(gene_names) if len(gene_names) > 0 else 0.0
+
     results = {
         "config": {
             "num_genes": len(gene_names),
@@ -729,6 +744,12 @@ def main():
             "patience": args.patience,
             "eval_metric": args.eval_metric,
             "use_weighted_sampling": args.use_weighted_sampling,
+        },
+        "gene_vocabulary": {
+            "vocab_size": len(model.gene_vocab),
+            "dataset_genes": len(gene_names),
+            "genes_in_vocab": genes_in_vocab,
+            "vocab_coverage": vocab_coverage,
         },
         "training_history": {
             "train_loss": history["train_loss"],
