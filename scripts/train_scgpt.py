@@ -19,10 +19,11 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
 import anndata as ad
 from accelerate import Accelerator
 import scipy.sparse
+from sklearn.metrics import f1_score, roc_auc_score, confusion_matrix
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -191,8 +192,9 @@ def create_dataloaders(
     scgpt_wrapper: scGPTWrapper,
     batch_size: int = 16,
     max_len: int = 2048,
+    use_weighted_sampling: bool = True,
 ) -> tuple:
-    """Create PyTorch dataloaders with scGPT tokenization."""
+    """Create PyTorch dataloaders with scGPT tokenization and weighted sampling for imbalanced data."""
     logger.info(
         f"Creating scGPT dataloaders with batch_size={batch_size}, max_len={max_len}"
     )
@@ -201,13 +203,34 @@ def create_dataloaders(
     val_dataset = scGPTDataset(X_val, y_val, gene_names, scgpt_wrapper, max_len)
     test_dataset = scGPTDataset(X_test, y_test, gene_names, scgpt_wrapper, max_len)
 
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        collate_fn=collate_scgpt_batch,
-        pin_memory=torch.cuda.is_available(),
-    )
+    # AD-specific: Use weighted sampling for imbalanced dataset
+    if use_weighted_sampling:
+        # Calculate class weights for weighted sampling
+        class_counts = np.bincount(y_train)
+        class_weights = 1.0 / class_counts
+        sample_weights = class_weights[y_train]
+        sampler = WeightedRandomSampler(
+            weights=sample_weights,
+            num_samples=len(y_train),
+            replacement=True
+        )
+        logger.info(f"Using weighted sampling: class weights = {class_weights}")
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            sampler=sampler,
+            collate_fn=collate_scgpt_batch,
+            pin_memory=torch.cuda.is_available(),
+        )
+    else:
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            collate_fn=collate_scgpt_batch,
+            pin_memory=torch.cuda.is_available(),
+        )
+
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
@@ -238,9 +261,11 @@ class scGPTTrainer:
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         use_accelerate: bool = True,
         accelerator=None,
+        eval_metric: str = "f1",
     ):
         """Initialize trainer."""
         self.use_accelerate = use_accelerate
+        self.eval_metric = eval_metric  # Track metric for early stopping
 
         # Initialize or use provided Accelerator
         if self.use_accelerate:
@@ -290,7 +315,9 @@ class scGPTTrainer:
 
         self.criterion = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight)
         self.best_val_loss = float("inf")
+        self.best_val_f1 = 0.0
         self.patience_counter = 0
+        logger.info(f"Using '{eval_metric}' metric for early stopping")
 
     def train_epoch(self, train_loader, epoch: int) -> tuple:
         """Train for one epoch."""
@@ -376,11 +403,13 @@ class scGPTTrainer:
         return avg_loss, avg_accuracy
 
     def validate(self, val_loader) -> tuple:
-        """Validate on validation set."""
+        """Validate on validation set and compute F1 score for AD classification."""
         self.model.eval()
         total_loss = 0.0
         total_accuracy = 0.0
         num_batches = 0
+        all_preds = []
+        all_labels = []
 
         with torch.no_grad():
             for batch in val_loader:
@@ -409,10 +438,19 @@ class scGPTTrainer:
                 total_accuracy += accuracy.item()
                 num_batches += 1
 
+                # Collect predictions for F1 score computation
+                all_preds.append(preds.cpu().numpy())
+                all_labels.append(labels.cpu().numpy())
+
         avg_loss = total_loss / num_batches
         avg_accuracy = total_accuracy / num_batches
 
-        return avg_loss, avg_accuracy
+        # Compute F1 score for binary classification
+        all_preds = np.concatenate(all_preds, axis=0).flatten().astype(int)
+        all_labels = np.concatenate(all_labels, axis=0).flatten().astype(int)
+        val_f1 = f1_score(all_labels, all_preds, zero_division=0)
+
+        return avg_loss, avg_accuracy, val_f1
 
     def fit(
         self,
@@ -421,16 +459,18 @@ class scGPTTrainer:
         num_epochs: int = 15,
         patience: int = 3,
     ) -> dict:
-        """Train model with early stopping."""
+        """Train model with early stopping based on selected metric (F1 or loss)."""
         history = {
             "train_loss": [],
             "train_accuracy": [],
             "val_loss": [],
             "val_accuracy": [],
+            "val_f1": [],
         }
 
         if not self.use_accelerate or self.accelerator.is_main_process:
             logger.info(f"Starting fine-tuning: {num_epochs} epochs, patience={patience}")
+            logger.info(f"Early stopping metric: {self.eval_metric}")
 
         for epoch in range(num_epochs):
             # Train
@@ -438,31 +478,49 @@ class scGPTTrainer:
             history["train_loss"].append(train_loss)
             history["train_accuracy"].append(train_acc)
 
-            # Validate
-            val_loss, val_acc = self.validate(val_loader)
+            # Validate (now returns loss, accuracy, AND F1)
+            val_loss, val_acc, val_f1 = self.validate(val_loader)
             history["val_loss"].append(val_loss)
             history["val_accuracy"].append(val_acc)
+            history["val_f1"].append(val_f1)
 
             if not self.use_accelerate or self.accelerator.is_main_process:
                 logger.info(
                     f"Epoch {epoch:3d} | Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | "
-                    f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f}"
+                    f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f} | Val F1: {val_f1:.4f}"
                 )
 
-            # Early stopping
-            if val_loss < self.best_val_loss:
-                self.best_val_loss = val_loss
-                self.patience_counter = 0
-                if not self.use_accelerate or self.accelerator.is_main_process:
-                    logger.info(f"  → New best validation loss: {val_loss:.4f}")
-            else:
-                self.patience_counter += 1
-                if self.patience_counter >= patience:
+            # Early stopping based on selected metric
+            if self.eval_metric == "f1":
+                # Maximize F1 score
+                if val_f1 > self.best_val_f1:
+                    self.best_val_f1 = val_f1
+                    self.patience_counter = 0
                     if not self.use_accelerate or self.accelerator.is_main_process:
-                        logger.info(
-                            f"Early stopping triggered (patience {patience} reached)"
-                        )
-                    break
+                        logger.info(f"  → New best F1 score: {val_f1:.4f}")
+                else:
+                    self.patience_counter += 1
+                    if self.patience_counter >= patience:
+                        if not self.use_accelerate or self.accelerator.is_main_process:
+                            logger.info(
+                                f"Early stopping triggered (patience {patience} reached, best F1: {self.best_val_f1:.4f})"
+                            )
+                        break
+            else:
+                # Minimize loss
+                if val_loss < self.best_val_loss:
+                    self.best_val_loss = val_loss
+                    self.patience_counter = 0
+                    if not self.use_accelerate or self.accelerator.is_main_process:
+                        logger.info(f"  → New best validation loss: {val_loss:.4f}")
+                else:
+                    self.patience_counter += 1
+                    if self.patience_counter >= patience:
+                        if not self.use_accelerate or self.accelerator.is_main_process:
+                            logger.info(
+                                f"Early stopping triggered (patience {patience} reached, best loss: {self.best_val_loss:.4f})"
+                            )
+                        break
 
         return history
 
@@ -473,18 +531,25 @@ def parse_arguments():
     parser.add_argument("--data-dir", type=str, required=True, help="Directory with preprocessed data (train.h5ad, val.h5ad, test.h5ad)")
     parser.add_argument("--output-dir", type=str, default="./results/scgpt", help="Directory to save results and checkpoint")
     parser.add_argument("--batch-size", type=int, default=16, help="Batch size for training (default: 16)")
-    parser.add_argument("--learning-rate", type=float, default=1e-5, help="Learning rate for fine-tuning (default: 1e-5)")
+    parser.add_argument("--learning-rate", type=float, default=5e-6, help="Learning rate for fine-tuning (default: 5e-6, optimized for AD)")
     parser.add_argument("--epochs", type=int, default=15, help="Number of training epochs (default: 15)")
     parser.add_argument("--weight-decay", type=float, default=0.01, help="Weight decay for regularization (default: 0.01)")
     parser.add_argument("--n-bins", type=int, default=51, help="Number of expression bins (default: 51)")
     parser.add_argument("--d-model", type=int, default=512, help="Model dimension (default: 512)")
     parser.add_argument("--nhead", type=int, default=8, help="Number of attention heads (default: 8)")
     parser.add_argument("--num-layers", type=int, default=12, help="Number of transformer layers (default: 12)")
-    parser.add_argument("--freeze-layers", type=int, default=6, help="Number of layers to freeze (default: 6)")
-    parser.add_argument("--warmup-steps", type=int, default=500, help="Warmup steps for scheduler (default: 500)")
-    parser.add_argument("--patience", type=int, default=3, help="Early stopping patience (default: 3)")
+    parser.add_argument("--freeze-layers", type=int, default=8, help="Number of layers to freeze - AD optimized (default: 8)")
+    parser.add_argument("--warmup-steps", type=int, default=1000, help="Warmup steps for scheduler - AD optimized (default: 1000)")
+    parser.add_argument("--patience", type=int, default=5, help="Early stopping patience - AD optimized (default: 5)")
+    parser.add_argument("--max-sequence-length", type=int, default=1200, help="Max sequence length for tokens - AD optimized (default: 1200)")
+    parser.add_argument("--eval-metric", type=str, default="f1", choices=["f1", "loss"], help="Metric for best model selection (default: f1)")
+    parser.add_argument("--use-weighted-sampling", action="store_true", default=True, help="Use weighted sampling for imbalanced data (default: True)")
+    parser.add_argument("--focal-loss-gamma", type=float, default=0.0, help="Focal loss gamma for hard example mining (default: 0.0, use 2.0 for AD)")
+    parser.add_argument("--expression-noise-std", type=float, default=0.0, help="Std dev of Gaussian noise for augmentation (default: 0.0)")
     parser.add_argument("--use-accelerate", action="store_true", default=False, help="Use Accelerate for distributed training (default: False)")
     parser.add_argument("--no-accelerate", dest="use_accelerate", action="store_false", help="Disable Accelerate and use single GPU/CPU")
+    parser.add_argument("--pretrained-path", type=str, default=None, help="Path to pretrained scGPT checkpoint (.pt file)")
+    parser.add_argument("--vocab-path", type=str, default=None, help="Path to pretrained gene vocabulary (vocab.json)")
     return parser.parse_args()
 
 
@@ -523,8 +588,8 @@ def main():
     try:
         model = scGPTWrapper(
             gene_names=gene_names,
-            pretrained_path=None,  # No pretrained weights unless provided
-            vocab_path=None,  # Create vocabulary from dataset genes
+            pretrained_path=args.pretrained_path,  # Load pretrained weights if provided
+            vocab_path=args.vocab_path,  # Load pretrained vocabulary if provided
             n_bins=args.n_bins,
             d_model=args.d_model,
             nhead=args.nhead,
@@ -539,6 +604,16 @@ def main():
             use_fast_transformer=True,
         )
         logger.info("✓ scGPT model initialized successfully")
+
+        # Log pretrained weight usage
+        if args.pretrained_path:
+            logger.info(f"  Loaded pretrained checkpoint from: {args.pretrained_path}")
+        else:
+            logger.info("  Training from scratch (no pretrained weights)")
+        if args.vocab_path:
+            logger.info(f"  Loaded pretrained vocabulary from: {args.vocab_path}")
+        else:
+            logger.info("  Created vocabulary from dataset genes")
     except ImportError as e:
         logger.error(f"Failed to initialize scGPT: {e}")
         logger.error("Install scGPT with: pip install scgpt")
@@ -548,13 +623,15 @@ def main():
     logger.info("\n" + "=" * 80)
     logger.info("STEP 3: Creating scGPT-format Dataloaders")
     logger.info("=" * 80)
-    max_len = min(2048, X_train.shape[1])
+    max_len = min(args.max_sequence_length, X_train.shape[1])
+    logger.info(f"Using max sequence length: {max_len} (default: {args.max_sequence_length}, available genes: {X_train.shape[1]})")
 
     train_loader, val_loader, test_loader = create_dataloaders(
         X_train, y_train, X_val, y_val, X_test, y_test,
         gene_names, model,
         batch_size=args.batch_size,
         max_len=max_len,
+        use_weighted_sampling=args.use_weighted_sampling,
     )
 
     # Step 4: Create fine-tuner
@@ -600,6 +677,7 @@ def main():
         device=device,
         use_accelerate=args.use_accelerate,
         accelerator=accelerator_instance,
+        eval_metric=args.eval_metric,  # AD-optimized: use F1 for early stopping
     )
 
     # Step 5: Fine-tune model
@@ -645,15 +723,25 @@ def main():
             "batch_size": args.batch_size,
             "max_sequence_length": max_len,
             "model_type": "scGPT (actual library)",
+            # AD-specific configurations
+            "learning_rate": args.learning_rate,
+            "warmup_steps": args.warmup_steps,
+            "patience": args.patience,
+            "eval_metric": args.eval_metric,
+            "use_weighted_sampling": args.use_weighted_sampling,
         },
         "training_history": {
             "train_loss": history["train_loss"],
             "train_accuracy": history["train_accuracy"],
             "val_loss": history["val_loss"],
             "val_accuracy": history["val_accuracy"],
+            "val_f1": history["val_f1"],  # AD-specific: F1 score for early stopping
         },
         "test_metrics": test_metrics,
-        "pretrained_used": False,
+        # Pretrained weight tracking
+        "pretrained_used": args.pretrained_path is not None,
+        "pretrained_checkpoint": args.pretrained_path if args.pretrained_path else "None (trained from scratch)",
+        "pretrained_vocab": args.vocab_path if args.vocab_path else "Created from dataset genes",
     }
 
     results_path = output_dir / "results.json"
