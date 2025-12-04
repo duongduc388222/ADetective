@@ -350,7 +350,7 @@ class scGPTWrapper(nn.Module):
         return {
             "gene_ids": torch.tensor(gene_ids, dtype=torch.long),
             "values": torch.tensor(binned_values, dtype=torch.float),
-            "padding_mask": torch.tensor(padding_mask),
+            "padding_mask": torch.tensor(padding_mask, dtype=torch.bool),
         }
 
     def _bin_expression(self, values: np.ndarray) -> np.ndarray:
