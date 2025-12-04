@@ -586,6 +586,8 @@ def main():
     logger.info("=" * 80)
 
     try:
+        # Now pass pretrained_path to init - architecture mismatch is fixed
+        # d_hid=d_model (512) matches pretrained checkpoint, not d_model*4 (2048)
         model = scGPTWrapper(
             gene_names=gene_names,
             pretrained_path=args.pretrained_path,  # Load pretrained weights if provided
@@ -605,11 +607,12 @@ def main():
         )
         logger.info("✓ scGPT model initialized successfully")
 
-        # Log pretrained weight usage
+        # Log pretrained weight usage and vocabulary info
         if args.pretrained_path:
-            logger.info(f"  Loaded pretrained checkpoint from: {args.pretrained_path}")
+            logger.info(f"✓ Loaded pretrained checkpoint from: {args.pretrained_path}")
         else:
             logger.info("  Training from scratch (no pretrained weights)")
+
         if args.vocab_path:
             logger.info(f"  Loaded pretrained vocabulary from: {args.vocab_path}")
         else:

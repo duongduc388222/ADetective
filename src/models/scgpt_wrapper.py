@@ -115,11 +115,13 @@ class scGPTWrapper(nn.Module):
         self.gene_vocab = self._load_gene_vocab(vocab_path, gene_names)
 
         # Create scGPT's TransformerModel
+        # IMPORTANT: Use d_hid=d_model (512) to match pretrained weights architecture
+        # The pretrained checkpoint uses linear1/linear2 with shape [512, 512], NOT [2048, 512]
         self.transformer = TransformerModel(
             ntoken=len(self.gene_vocab),
             d_model=d_model,
             nhead=nhead,
-            d_hid=d_model * 4,  # scGPT uses 4x hidden dimension
+            d_hid=d_model,  # Match pretrained checkpoint: d_hid = d_model (512), not d_model * 4
             nlayers=num_layers,
             nlayers_cls=1,  # Single classification head layer
             n_input_bins=n_bins,
