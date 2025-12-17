@@ -13,8 +13,10 @@ torch>=2.0.0
 torchvision>=0.15.0
 
 # Training utilities
-accelerate>=0.24.0
-transformers>=4.34.0
+accelerate>=0.30.0
+transformers>=4.40.0
+datasets>=2.19.0,<3.0.0
+huggingface_hub>=0.24.0
 
 # Evaluation & metrics
 matplotlib>=3.7.0
