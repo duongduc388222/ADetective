@@ -1,7 +1,8 @@
+import json
 import logging
 import os
 from pathlib import Path
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, Set
 import numpy as np
 import pandas as pd
 import anndata as ad
@@ -191,6 +192,93 @@ class SEAADDataLoader:
         logger.info(f"✓ Gene filtering complete")
 
         return self.adata
+
+    def filter_to_vocab(
+        self,
+        vocab_path: str,
+        min_coverage: float = 0.3,
+    ) -> Tuple[ad.AnnData, Dict[str, Any]]:
+        """
+        Filter genes to only those present in a vocabulary (e.g., scGPT vocab).
+
+        This should be called BEFORE HVG selection to ensure all selected HVGs
+        are in the vocabulary. This guarantees 100% vocab coverage during training.
+
+        Args:
+            vocab_path: Path to vocabulary JSON file (e.g., scGPT vocab.json)
+            min_coverage: Minimum coverage threshold (default: 0.3 = 30%)
+
+        Returns:
+            Tuple of (filtered AnnData, coverage report)
+
+        Raises:
+            FileNotFoundError: If vocab file doesn't exist
+            ValueError: If coverage is below minimum threshold
+        """
+        if self.adata is None:
+            self.load_raw_data()
+
+        logger.info(f"Filtering genes to vocabulary: {vocab_path}")
+
+        # Load vocabulary
+        vocab_path = Path(vocab_path)
+        if not vocab_path.exists():
+            raise FileNotFoundError(f"Vocabulary file not found: {vocab_path}")
+
+        with open(vocab_path, 'r') as f:
+            vocab = json.load(f)
+
+        vocab_genes: Set[str] = set(vocab.keys())
+        logger.info(f"  Vocabulary size: {len(vocab_genes):,} genes")
+
+        # Get dataset genes
+        dataset_genes = set(self.adata.var_names.tolist())
+        logger.info(f"  Dataset genes: {len(dataset_genes):,} genes")
+
+        # Compute intersection
+        intersection = vocab_genes & dataset_genes
+        oov_genes = dataset_genes - vocab_genes
+
+        coverage = len(intersection) / len(dataset_genes) if len(dataset_genes) > 0 else 0.0
+        logger.info(f"  Intersection: {len(intersection):,} genes ({coverage:.1%} coverage)")
+        logger.info(f"  OOV genes (will be dropped): {len(oov_genes):,}")
+
+        # Check minimum coverage
+        if coverage < min_coverage:
+            raise ValueError(
+                f"Vocabulary coverage too low: {coverage:.1%} < {min_coverage:.1%}\n"
+                f"Only {len(intersection):,} of {len(dataset_genes):,} genes are in the vocabulary.\n"
+                f"This may indicate gene name format mismatch (ENSEMBL vs symbols)."
+            )
+
+        # Filter to intersection genes
+        before_count = self.adata.n_vars
+        gene_mask = self.adata.var_names.isin(intersection)
+
+        # Handle backed mode
+        if hasattr(self.adata, 'isbacked') and self.adata.isbacked:
+            logger.info("  Loading filtered subset into memory...")
+            self.adata = self.adata[:, gene_mask].to_memory()
+        else:
+            self.adata = self.adata[:, gene_mask].copy()
+
+        logger.info(f"  Genes before: {before_count:,}")
+        logger.info(f"  Genes after:  {self.adata.n_vars:,}")
+        logger.info(f"✓ Vocabulary filtering complete")
+
+        # Create coverage report
+        report = {
+            "vocab_path": str(vocab_path),
+            "vocab_size": len(vocab_genes),
+            "dataset_genes_before": before_count,
+            "dataset_genes_after": self.adata.n_vars,
+            "intersection": len(intersection),
+            "oov_genes_dropped": len(oov_genes),
+            "coverage": coverage,
+            "oov_gene_samples": sorted(list(oov_genes))[:50],  # First 50 OOV genes as sample
+        }
+
+        return self.adata, report
 
     def create_labels(
         self, exclude_categories: Optional[list] = None

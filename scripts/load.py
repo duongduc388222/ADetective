@@ -57,6 +57,13 @@ Examples:
     --data-path /content/SEAAD_A9_RNAseq_DREAM_Cleaned.h5ad \\
     --output-dir ./results \\
     --n-hvgs 2000
+
+  # With scGPT vocabulary pre-filtering (guarantees 100% vocab coverage)
+  python scripts/load.py \\
+    --data-path ./data/SEAAD_A9_RNAseq_DREAM_Cleaned.h5ad \\
+    --output-dir ./results \\
+    --scgpt-vocab ./examples/save/scGPT_bc/vocab.json \\
+    --n-hvgs 2000
         """,
     )
 
@@ -70,6 +77,8 @@ Examples:
     parser.add_argument("--no-normalize", action="store_true", help="Skip normalization (library-size normalization + log1p transform)")
     parser.add_argument("--target-sum", type=float, default=1e4, help="Target sum for library-size normalization (default: 10000)")
     parser.add_argument("--min-label-ratio", type=float, default=0.3, help="Minimum ratio for minority class in each split (default: 0.3)")
+    parser.add_argument("--scgpt-vocab", type=str, default=None, help="Path to scGPT vocab.json to pre-filter genes (ensures 100%% vocab coverage for scGPT training)")
+    parser.add_argument("--vocab-min-coverage", type=float, default=0.3, help="Minimum vocab coverage threshold (default: 0.3 = 30%%)")
 
     return parser.parse_args()
 
@@ -98,6 +107,9 @@ def main():
     logger.info(f"Output directory: {output_dir}")
     logger.info(f"Train/Val/Test split: {args.train_ratio}/{args.val_ratio}/{args.test_ratio}")
     logger.info(f"Number of HVGs: {args.n_hvgs}")
+    if args.scgpt_vocab:
+        logger.info(f"scGPT vocabulary: {args.scgpt_vocab}")
+        logger.info(f"  (Pre-filtering genes to vocab for 100% coverage)")
 
     # Initialize data loader
     try:
@@ -147,6 +159,31 @@ def main():
         logger.error(f"Failed to filter genes: {e}")
         logger.error(f"Error details: {e}")
         return False
+
+    # Step 4.5: Filter to vocabulary (optional, for scGPT)
+    vocab_report = None
+    if args.scgpt_vocab:
+        logger.info("\n" + "=" * 80)
+        logger.info("STEP 4.5: Filtering to scGPT Vocabulary")
+        logger.info("=" * 80)
+        logger.info("This ensures 100% vocab coverage during scGPT training")
+        try:
+            adata, vocab_report = loader.filter_to_vocab(
+                vocab_path=args.scgpt_vocab,
+                min_coverage=args.vocab_min_coverage,
+            )
+            logger.info(f"Vocabulary coverage: {vocab_report['coverage']:.1%}")
+            logger.info(f"Genes retained: {vocab_report['intersection']:,}")
+            logger.info(f"OOV genes dropped: {vocab_report['oov_genes_dropped']:,}")
+        except FileNotFoundError as e:
+            logger.error(f"Vocabulary file not found: {e}")
+            return False
+        except ValueError as e:
+            logger.error(f"Vocabulary coverage too low: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Failed to filter to vocabulary: {e}")
+            return False
 
     # Step 5: Create binary labels (High vs Not AD)
     logger.info("\n" + "=" * 80)
@@ -283,6 +320,14 @@ def main():
         logger.error(f"Failed to save processed data: {e}")
         return False
 
+    # Save vocab report if vocabulary filtering was done
+    if vocab_report is not None:
+        import json
+        vocab_report_path = output_dir / "vocab_filter_report.json"
+        with open(vocab_report_path, 'w') as f:
+            json.dump(vocab_report, f, indent=2)
+        logger.info(f"✓ Saved vocab filter report: {vocab_report_path}")
+
     # Summary
     logger.info("\n" + "=" * 80)
     logger.info("DATA LOADING COMPLETE")
@@ -291,6 +336,11 @@ def main():
     logger.info(f"  Train: {train_data.n_obs} cells × {train_data.n_vars} genes")
     logger.info(f"  Val:   {val_data.n_obs} cells × {val_data.n_vars} genes")
     logger.info(f"  Test:  {test_data.n_obs} cells × {test_data.n_vars} genes")
+    if vocab_report is not None:
+        logger.info(f"\nVocabulary filtering:")
+        logger.info(f"  Coverage: {vocab_report['coverage']:.1%}")
+        logger.info(f"  Genes in vocab: {vocab_report['intersection']:,}")
+        logger.info(f"  OOV genes dropped: {vocab_report['oov_genes_dropped']:,}")
     logger.info(f"\nProcessed data saved to: {output_dir}")
 
     return True
