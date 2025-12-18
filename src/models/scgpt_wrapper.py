@@ -23,6 +23,43 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Monkey-patch torchtext to avoid dependency conflict with PyTorch versions
+# scgpt requires torchtext which forces torch 2.0.1, but we need torch 2.5+ for flash_attn
+# This patch creates a fake torchtext module so scgpt can import without the real torchtext
+import sys
+if 'torchtext' not in sys.modules:
+    try:
+        import torchtext  # noqa: F401
+    except (ImportError, OSError):
+        # torchtext not installed or incompatible - create mock
+        from unittest.mock import MagicMock
+
+        # Create fake torchtext.vocab module with minimal Vocab implementation
+        class FakeVocab:
+            """Minimal Vocab implementation to replace torchtext.vocab.Vocab."""
+            def __init__(self, counter=None, specials=None, **kwargs):
+                self.itos = []
+                self.stoi = {}
+                if specials:
+                    for s in specials:
+                        self.stoi[s] = len(self.itos)
+                        self.itos.append(s)
+
+            def __len__(self):
+                return len(self.itos)
+
+            def __getitem__(self, token):
+                return self.stoi.get(token, 0)
+
+            def __contains__(self, token):
+                return token in self.stoi
+
+        fake_torchtext = MagicMock()
+        fake_torchtext.vocab.Vocab = FakeVocab
+        sys.modules['torchtext'] = fake_torchtext
+        sys.modules['torchtext.vocab'] = fake_torchtext.vocab
+        logger.info("Patched torchtext module to avoid version conflict with PyTorch")
+
 # Try to import actual scGPT library
 try:
     import scgpt as scg
@@ -30,10 +67,10 @@ try:
     from scgpt.tokenizer.gene_tokenizer import GeneVocab
     from scgpt.loss import masked_mse_loss, criterion_neg_log_bernoulli
     SCGPT_AVAILABLE = True
-except ImportError:
+except ImportError as e:
     logger.warning(
-        "scGPT library not installed. Install with: "
-        "pip install scgpt or git+https://github.com/bowang-lab/scGPT.git"
+        f"scGPT library not installed or import failed: {e}. Install with: "
+        "pip install scgpt --no-deps"
     )
     SCGPT_AVAILABLE = False
 
