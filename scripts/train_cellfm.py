@@ -397,6 +397,12 @@ class CellFMTrainer:
         if not use_accelerate:
             self.model = self.model.to(device)
 
+    def _is_main_process(self) -> bool:
+        """Check if this is the main process (for logging in distributed training)."""
+        if not self.use_accelerate or self.accelerator is None:
+            return True
+        return self.accelerator.is_main_process
+
     def _create_optimizer(self) -> torch.optim.Optimizer:
         """Create optimizer."""
         training_config = self.config.get("training", {})
@@ -552,21 +558,34 @@ class CellFMTrainer:
             history["val_loss"].append(val_loss)
             history["val_accuracy"].append(val_acc)
 
-            logger.info(
-                f"Epoch {epoch+1}/{num_epochs} - "
-                f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f} - "
-                f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}, Val F1: {val_metrics['f1']:.4f}"
-            )
+            # Log only from main process (avoids duplicate logs in distributed training)
+            if self._is_main_process():
+                logger.info(
+                    f"Epoch {epoch+1}/{num_epochs} - "
+                    f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f} - "
+                    f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}, Val F1: {val_metrics['f1']:.4f}"
+                )
 
-            # Early stopping
-            if val_loss < self.best_val_loss:
-                self.best_val_loss = val_loss
-                self.patience_counter = 0
-            else:
-                self.patience_counter += 1
-                if self.patience_counter >= patience:
-                    logger.info(f"Early stopping triggered at epoch {epoch+1}")
-                    break
+            # Early stopping (only check on main process, then sync)
+            should_stop = False
+            if self._is_main_process():
+                if val_loss < self.best_val_loss:
+                    self.best_val_loss = val_loss
+                    self.patience_counter = 0
+                else:
+                    self.patience_counter += 1
+                    if self.patience_counter >= patience:
+                        logger.info(f"Early stopping triggered at epoch {epoch+1}")
+                        should_stop = True
+
+            # Synchronize early stopping across all processes
+            if self.use_accelerate and self.accelerator is not None:
+                should_stop_tensor = torch.tensor([should_stop], device=self.accelerator.device)
+                should_stop_tensor = self.accelerator.gather(should_stop_tensor)
+                should_stop = should_stop_tensor[0].item()
+
+            if should_stop:
+                break
 
         return history
 
