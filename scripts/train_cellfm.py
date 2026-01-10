@@ -406,6 +406,8 @@ class CellFMTrainer:
         Returns:
             Tuple of (average_loss, accuracy)
         """
+        from tqdm import tqdm
+
         self.model.train()
         total_loss = 0.0
         all_preds = []
@@ -413,8 +415,21 @@ class CellFMTrainer:
 
         training_config = self.config.get("training", {})
         gradient_clip = training_config.get("gradient_clipping", 1.0)
+        log_frequency = self.config.get("logging", {}).get("log_frequency", 50)
 
-        for batch_idx, (x, y) in enumerate(train_loader):
+        # Create progress bar (only on main process)
+        if self._is_main_process():
+            pbar = tqdm(
+                enumerate(train_loader),
+                total=len(train_loader),
+                desc=f"Epoch {epoch+1}",
+                leave=True,
+                ncols=100,
+            )
+        else:
+            pbar = enumerate(train_loader)
+
+        for batch_idx, (x, y) in pbar:
             # Move to device if not using Accelerate
             if not self.use_accelerate:
                 x = x.to(self.device)
@@ -443,10 +458,22 @@ class CellFMTrainer:
                 self.scheduler.step()
 
             # Track metrics
-            total_loss += loss.item()
+            batch_loss = loss.item()
+            total_loss += batch_loss
             preds = torch.argmax(logits, dim=1)
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(y.cpu().numpy())
+
+            # Update progress bar with current loss
+            if self._is_main_process() and hasattr(pbar, 'set_postfix'):
+                pbar.set_postfix({
+                    'loss': f'{batch_loss:.4f}',
+                    'avg_loss': f'{total_loss / (batch_idx + 1):.4f}'
+                })
+
+        # Close progress bar
+        if self._is_main_process() and hasattr(pbar, 'close'):
+            pbar.close()
 
         avg_loss = total_loss / len(train_loader)
         accuracy = accuracy_score(all_labels, all_preds)
@@ -460,14 +487,28 @@ class CellFMTrainer:
         Returns:
             Tuple of (average_loss, accuracy, metrics_dict)
         """
+        from tqdm import tqdm
+
         self.model.eval()
         total_loss = 0.0
         all_preds = []
         all_probs = []
         all_labels = []
 
+        # Create progress bar for validation (only on main process)
+        if self._is_main_process():
+            pbar = tqdm(
+                val_loader,
+                total=len(val_loader),
+                desc="Validating",
+                leave=False,
+                ncols=100,
+            )
+        else:
+            pbar = val_loader
+
         with torch.no_grad():
-            for x, y in val_loader:
+            for x, y in pbar:
                 if not self.use_accelerate:
                     x = x.to(self.device)
                     y = y.to(self.device)
@@ -482,6 +523,10 @@ class CellFMTrainer:
                 all_preds.extend(preds.cpu().numpy())
                 all_probs.extend(probs.cpu().numpy())
                 all_labels.extend(y.cpu().numpy())
+
+        # Close progress bar
+        if self._is_main_process() and hasattr(pbar, 'close'):
+            pbar.close()
 
         avg_loss = total_loss / len(val_loader)
         metrics = {
