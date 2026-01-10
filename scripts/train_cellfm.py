@@ -170,62 +170,32 @@ class ScanpyDataset(Dataset):
 # Model Components
 # =============================================================================
 
-def load_cellfm_backbone(
-    weights_path: str,
-    config_path: Optional[str] = None,
-    strict: bool = False,
-) -> Tuple[nn.Module, int]:
-    """
-    Placeholder: Load pretrained CellFM backbone.
-
-    This function should be implemented to load the actual CellFM model.
-    The implementation will depend on the CellFM architecture and weight format.
-
-    Args:
-        weights_path: Path to CellFM checkpoint (.pt or .ckpt)
-        config_path: Optional path to model config
-        strict: If False, ignore mismatched keys (e.g., pretraining head)
-
-    Returns:
-        Tuple of (backbone_module, hidden_dim)
-
-    Example implementation:
-        ```python
-        from cellfm import CellFMEncoder  # hypothetical import
-
-        # Load config
-        config = load_config(config_path) if config_path else default_config
-
-        # Create backbone
-        backbone = CellFMEncoder(config)
-
-        # Load weights
-        state_dict = torch.load(weights_path, map_location="cpu")
-
-        # Filter out pretraining head keys if needed
-        if "pretraining_head" in state_dict:
-            state_dict = {k: v for k, v in state_dict.items()
-                         if not k.startswith("pretraining_head")}
-
-        backbone.load_state_dict(state_dict, strict=strict)
-
-        hidden_dim = config.hidden_dim  # or backbone.config.hidden_dim
-        return backbone, hidden_dim
-        ```
-    """
-    raise NotImplementedError(
-        "\n" + "=" * 70 + "\n"
-        "Please implement load_cellfm_backbone() to load your CellFM weights.\n"
-        "=" * 70 + "\n\n"
-        "Expected signature:\n"
-        "  backbone, hidden_dim = load_cellfm_backbone(weights_path)\n\n"
-        "Expected backbone interface:\n"
-        "  - Input: x (batch_size, n_genes) - gene expression vectors\n"
-        "  - Output: features (batch_size, hidden_dim) - learned representations\n\n"
-        "Default hidden_dim: 1536\n\n"
-        "See the docstring for an example implementation.\n"
-        + "=" * 70
-    )
+# Import CellFM backbone loader from cellfm_backbone.py
+try:
+    from cellfm_backbone import load_cellfm_backbone
+except ImportError:
+    # Fallback if cellfm_backbone.py is not in the same directory
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).parent))
+    try:
+        from cellfm_backbone import load_cellfm_backbone
+    except ImportError:
+        def load_cellfm_backbone(
+            weights_path: str,
+            config_path: Optional[str] = None,
+            strict: bool = False,
+        ) -> Tuple[nn.Module, int]:
+            """Placeholder - cellfm_backbone.py not found."""
+            raise ImportError(
+                "\n" + "=" * 70 + "\n"
+                "CellFM backbone loader not found!\n"
+                "=" * 70 + "\n\n"
+                "Please ensure cellfm_backbone.py exists in scripts/\n"
+                "Or install it with:\n"
+                "  See docs/CELLFM_FINETUNING_GUIDE.md for instructions\n"
+                + "=" * 70
+            )
 
 
 class CellFMClassifier(nn.Module):
