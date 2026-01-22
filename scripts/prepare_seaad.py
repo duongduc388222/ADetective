@@ -346,103 +346,6 @@ def load_filtered_data(
     return adata, label_mapping
 
 
-def filter_cell_type(adata, cell_type: str = "Oligodendrocyte", cell_type_column: str = "Subclass"):
-    """
-    Filter data for specific cell type.
-
-    Args:
-        adata: AnnData object (backed or in-memory)
-        cell_type: Cell type to filter for
-        cell_type_column: Column name for cell type
-
-    Returns:
-        Filtered AnnData object (in-memory)
-    """
-    logger.info(f"Filtering for {cell_type} cells using column '{cell_type_column}'")
-    before_count = adata.n_obs
-
-    # Verify column exists
-    if cell_type_column not in adata.obs:
-        raise ValueError(
-            f"Column '{cell_type_column}' not found in observations.\n"
-            f"Available columns: {list(adata.obs.columns)}"
-        )
-
-    # Filter (case-insensitive)
-    logger.info("Filtering...")
-    mask = adata.obs[cell_type_column].str.lower() == cell_type.lower()
-
-    # Handle both backed and in-memory AnnData
-    if hasattr(adata, 'isbacked') and adata.isbacked:
-        adata_filtered = adata[mask].to_memory()
-    else:
-        adata_filtered = adata[mask].copy()
-
-    logger.info(f"Cells before filtering: {before_count:,}")
-    logger.info(f"Cells after filtering:  {adata_filtered.n_obs:,}")
-
-    return adata_filtered
-
-
-def filter_adnc_and_create_labels(
-    adata,
-    adnc_column: str = "ADNC",
-    exclude_categories: Optional[List[str]] = None,
-) -> Tuple:
-    """
-    Filter ADNC categories and create 4-class labels.
-
-    Args:
-        adata: AnnData object
-        adnc_column: Column name for ADNC status
-        exclude_categories: Categories to exclude (default: empty list for 4-class)
-
-    Returns:
-        Tuple of (filtered AnnData, label mapping)
-    """
-    if exclude_categories is None:
-        exclude_categories = []  # Keep all 4 ADNC classes by default
-
-    logger.info(f"Creating labels from column '{adnc_column}'")
-    if exclude_categories:
-        logger.info(f"Excluding categories: {exclude_categories}")
-    else:
-        logger.info("Keeping all 4 ADNC classes: Not AD, Low, Intermediate, High")
-
-    # Verify column exists
-    if adnc_column not in adata.obs:
-        raise ValueError(
-            f"Column '{adnc_column}' not found in observations.\n"
-            f"Available columns: {list(adata.obs.columns)}"
-        )
-
-    # Show ADNC value distribution before filtering
-    logger.info("ADNC value distribution before filtering:")
-    logger.info(adata.obs[adnc_column].value_counts().to_string())
-
-    # Filter out excluded categories (if any)
-    if exclude_categories:
-        logger.info("Filtering by ADNC status...")
-        mask = ~adata.obs[adnc_column].isin(exclude_categories)
-        adata_filtered = adata[mask].copy()
-        logger.info(f"Cells retained: {adata_filtered.n_obs:,} / {adata.n_obs:,}")
-    else:
-        adata_filtered = adata.copy()
-        logger.info(f"All {adata_filtered.n_obs:,} cells retained (no exclusions)")
-
-    # Create 4-class labels: Not AD=0, Low=1, Intermediate=2, High=3
-    label_mapping = {"Not AD": 0, "Low": 1, "Intermediate": 2, "High": 3}
-    labels = adata_filtered.obs[adnc_column].map(label_mapping)
-
-    adata_filtered.obs["label"] = labels
-    adata_filtered.obs["label_name"] = adata_filtered.obs[adnc_column]  # Keep original names
-
-    logger.info("\nLabel distribution:")
-    logger.info(adata_filtered.obs["label_name"].value_counts().to_string())
-
-    return adata_filtered, label_mapping
-
-
 def stratified_donor_split(
     adata,
     train_ratio: float = 0.7,
@@ -672,6 +575,59 @@ def filter_genes(adata, min_cells: int = 100):
     return adata
 
 
+def _load_genemap(genemap_path: str) -> Tuple[List[str], Set[str]]:
+    """
+    Load genemap vocabulary from CSV file.
+
+    Args:
+        genemap_path: Path to genemap.csv file
+
+    Returns:
+        Tuple of (ordered gene list, gene set for fast lookup)
+
+    Raises:
+        FileNotFoundError: If genemap file doesn't exist
+    """
+    if not os.path.exists(genemap_path):
+        raise FileNotFoundError(f"Genemap file not found: {genemap_path}")
+
+    genemap_df = pd.read_csv(genemap_path)
+    gene_col = genemap_df.columns[0]
+    genemap_genes = genemap_df[gene_col].astype(str).str.strip().tolist()
+    genemap_set = set(genemap_genes)
+
+    return genemap_genes, genemap_set
+
+
+def _compute_genemap_coverage(
+    data_genes: Set[str],
+    genemap_set: Set[str],
+    vocab_size: int,
+    log_prefix: str = "",
+) -> Tuple[Set[str], float]:
+    """
+    Compute coverage statistics between data genes and genemap vocabulary.
+
+    Args:
+        data_genes: Set of gene names in data
+        genemap_set: Set of gene names in vocabulary
+        vocab_size: Size of vocabulary (for coverage calculation)
+        log_prefix: Prefix for log messages
+
+    Returns:
+        Tuple of (intersection set, coverage ratio)
+    """
+    intersection = data_genes & genemap_set
+    coverage = len(intersection) / vocab_size if vocab_size > 0 else 0
+
+    logger.info(f"{log_prefix}  Vocabulary size: {vocab_size:,} genes")
+    logger.info(f"{log_prefix}  Data genes: {len(data_genes):,}")
+    logger.info(f"{log_prefix}  Intersection: {len(intersection):,} genes")
+    logger.info(f"{log_prefix}  Coverage: {coverage:.1%} of vocabulary")
+
+    return intersection, coverage
+
+
 def filter_to_genemap(
     adata,
     genemap_path: str,
@@ -696,28 +652,12 @@ def filter_to_genemap(
     """
     logger.info(f"Filtering genes to genemap vocabulary: {genemap_path}")
 
-    # Load genemap vocabulary
-    if not os.path.exists(genemap_path):
-        raise FileNotFoundError(f"Genemap file not found: {genemap_path}")
-
-    genemap_df = pd.read_csv(genemap_path)
-
-    # The first column contains gene names (may have unnamed header)
-    gene_col = genemap_df.columns[0]
-    vocab_genes = set(genemap_df[gene_col].astype(str).str.strip())
-    logger.info(f"  Vocabulary size: {len(vocab_genes):,} genes")
-
-    # Get current genes in data
+    # Load genemap and compute coverage
+    genemap_genes, genemap_set = _load_genemap(genemap_path)
     data_genes = set(adata.var_names.astype(str))
-    logger.info(f"  Data genes: {len(data_genes):,}")
-
-    # Find intersection
-    intersection = data_genes & vocab_genes
-    logger.info(f"  Intersection: {len(intersection):,} genes")
-
-    # Calculate coverage
-    coverage = len(intersection) / len(vocab_genes) if vocab_genes else 0
-    logger.info(f"  Coverage: {coverage:.1%} of vocabulary")
+    intersection, coverage = _compute_genemap_coverage(
+        data_genes, genemap_set, len(genemap_genes)
+    )
 
     # Check minimum coverage
     if coverage < min_coverage:
@@ -779,27 +719,15 @@ def expand_to_genemap_vocab(
 
     logger.info(f"Expanding to genemap vocabulary: {genemap_path}")
 
-    # 1. Load genemap and get ordered gene list
-    if not os.path.exists(genemap_path):
-        raise FileNotFoundError(f"Genemap file not found: {genemap_path}")
-
-    genemap_df = pd.read_csv(genemap_path)
-    gene_col = genemap_df.columns[0]
-    genemap_genes = genemap_df[gene_col].astype(str).str.strip().tolist()
+    # Load genemap and compute coverage using shared helpers
+    genemap_genes, genemap_set = _load_genemap(genemap_path)
     vocab_size = len(genemap_genes)
-    logger.info(f"  Vocabulary size: {vocab_size:,} genes")
-
-    # 2. Find intersection and coverage
     data_genes = set(adata.var_names.astype(str))
-    genemap_genes_set = set(genemap_genes)
-    intersection = data_genes & genemap_genes_set
-    coverage = len(intersection) / vocab_size if vocab_size > 0 else 0
+    intersection, coverage = _compute_genemap_coverage(
+        data_genes, genemap_set, vocab_size
+    )
 
-    logger.info(f"  Data genes: {len(data_genes):,}")
-    logger.info(f"  Intersection: {len(intersection):,} genes")
-    logger.info(f"  Coverage: {coverage:.1%} of vocabulary")
-
-    # 3. Create gene-to-index mappings
+    # Create gene-to-index mappings
     genemap_idx = {g: i for i, g in enumerate(genemap_genes)}
     data_gene_to_idx = {g: i for i, g in enumerate(adata.var_names)}
 
@@ -912,6 +840,139 @@ def save_processed(adata, output_path: str):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     adata.write_h5ad(output_path)
     logger.info(f"Saved processed data to {output_path}")
+
+
+# =============================================================================
+# Split Processing Helpers
+# =============================================================================
+
+def _verify_gene_counts(train_data, val_data, test_data) -> None:
+    """
+    Verify gene counts are identical across train/val/test splits.
+
+    Handles cross-region mode where test may be empty.
+
+    Args:
+        train_data: Training AnnData
+        val_data: Validation AnnData
+        test_data: Test AnnData (may be empty in cross-region mode)
+
+    Raises:
+        AssertionError: If gene counts don't match
+    """
+    if test_data.n_obs > 0:
+        assert train_data.n_vars == val_data.n_vars == test_data.n_vars, \
+            "Gene counts must be identical across splits!"
+        logger.info(f"Verified: All splits have identical {train_data.n_vars:,} genes")
+    else:
+        assert train_data.n_vars == val_data.n_vars, \
+            "Gene counts must be identical for train and val!"
+        logger.info(f"Verified: Train and val have identical {train_data.n_vars:,} genes (cross-region mode)")
+
+
+def normalize_splits(train_data, val_data, test_data, target_sum: float = 1e4) -> Tuple:
+    """
+    Normalize train/val/test splits independently.
+
+    Handles cross-region mode where test may be empty.
+
+    Args:
+        train_data: Training AnnData
+        val_data: Validation AnnData
+        test_data: Test AnnData (may be empty)
+        target_sum: Target sum for library size normalization
+
+    Returns:
+        Tuple of (normalized train, val, test)
+    """
+    logger.info("Normalizing training set...")
+    train_data = normalize_data(train_data, target_sum=target_sum)
+
+    logger.info("Normalizing validation set...")
+    val_data = normalize_data(val_data, target_sum=target_sum)
+
+    if test_data.n_obs > 0:
+        logger.info("Normalizing test set...")
+        test_data = normalize_data(test_data, target_sum=target_sum)
+    else:
+        logger.info("Skipping test set normalization (cross-region mode: empty test set)")
+
+    logger.info("All splits normalized independently")
+    return train_data, val_data, test_data
+
+
+def expand_splits_to_vocab(train_data, val_data, test_data, genemap_path: str) -> Tuple:
+    """
+    Expand train/val/test splits to genemap vocabulary.
+
+    Handles cross-region mode where test may be empty.
+
+    Args:
+        train_data: Training AnnData
+        val_data: Validation AnnData
+        test_data: Test AnnData (may be empty)
+        genemap_path: Path to genemap.csv
+
+    Returns:
+        Tuple of (expanded train, val, test, vocab_expansion_report)
+    """
+    logger.info("Expanding training set to genemap vocabulary...")
+    train_data, vocab_expansion_report = expand_to_genemap_vocab(train_data, genemap_path)
+
+    logger.info("Expanding validation set to genemap vocabulary...")
+    val_data, _ = expand_to_genemap_vocab(val_data, genemap_path)
+
+    if test_data.n_obs > 0:
+        logger.info("Expanding test set to genemap vocabulary...")
+        test_data, _ = expand_to_genemap_vocab(test_data, genemap_path)
+    else:
+        logger.info("Skipping test set vocabulary expansion (cross-region mode: empty test set)")
+
+    logger.info(f"\nVocabulary expansion complete:")
+    logger.info(f"  Final shape: ({train_data.n_obs:,}, {train_data.n_vars:,})")
+    logger.info(f"  Coverage: {vocab_expansion_report['coverage']:.1%}")
+    logger.info(f"  Zero-padded genes: {vocab_expansion_report['zero_padded_genes']:,}")
+    logger.info(f"  Dropped OOV genes: {vocab_expansion_report['dropped_genes']:,}")
+
+    _verify_gene_counts(train_data, val_data, test_data)
+
+    return train_data, val_data, test_data, vocab_expansion_report
+
+
+def subset_splits_to_hvgs(train_data, val_data, test_data, n_hvgs: int = 2000) -> Tuple:
+    """
+    Select HVGs from training set and subset all splits to those genes.
+
+    Handles cross-region mode where test may be empty.
+
+    Args:
+        train_data: Training AnnData
+        val_data: Validation AnnData
+        test_data: Test AnnData (may be empty)
+        n_hvgs: Number of highly variable genes to select
+
+    Returns:
+        Tuple of (hvg train, val, test)
+    """
+    logger.info(f"Selecting {n_hvgs} HVGs from normalized training data...")
+    train_data = select_hvgs(train_data, n_hvgs=n_hvgs)
+    hvg_genes = train_data.var_names.copy()
+
+    logger.info(f"Selected {len(hvg_genes)} HVGs from training set")
+    logger.info("Subsetting validation and test sets to use the same genes...")
+
+    val_data = val_data[:, hvg_genes].copy()
+    logger.info(f"Val data subset to {val_data.n_vars} genes")
+
+    if test_data.n_obs > 0:
+        test_data = test_data[:, hvg_genes].copy()
+        logger.info(f"Test data subset to {test_data.n_vars} genes")
+    else:
+        logger.info("Skipping test set HVG subsetting (cross-region mode: empty test set)")
+
+    _verify_gene_counts(train_data, val_data, test_data)
+
+    return train_data, val_data, test_data
 
 
 def main():
@@ -1046,19 +1107,9 @@ def main():
         logger.info("STEP 6: Normalizing Data (Independent per Split)")
         logger.info("=" * 80)
         try:
-            logger.info("Normalizing training set...")
-            train_data = normalize_data(train_data, target_sum=args.target_sum)
-
-            logger.info("Normalizing validation set...")
-            val_data = normalize_data(val_data, target_sum=args.target_sum)
-
-            if test_data.n_obs > 0:
-                logger.info("Normalizing test set...")
-                test_data = normalize_data(test_data, target_sum=args.target_sum)
-            else:
-                logger.info("Skipping test set normalization (cross-region mode: empty test set)")
-
-            logger.info("All splits normalized independently")
+            train_data, val_data, test_data = normalize_splits(
+                train_data, val_data, test_data, target_sum=args.target_sum
+            )
         except Exception as e:
             logger.error(f"Failed to normalize data: {e}")
             return False
@@ -1075,29 +1126,9 @@ def main():
         logger.info("STEP 7: Expanding to Genemap Vocabulary (Foundation Model Mode)")
         logger.info("=" * 80)
         try:
-            logger.info("Expanding training set to genemap vocabulary...")
-            train_data, vocab_expansion_report = expand_to_genemap_vocab(train_data, args.genemap)
-
-            logger.info("Expanding validation set to genemap vocabulary...")
-            val_data, _ = expand_to_genemap_vocab(val_data, args.genemap)
-
-            if test_data.n_obs > 0:
-                logger.info("Expanding test set to genemap vocabulary...")
-                test_data, _ = expand_to_genemap_vocab(test_data, args.genemap)
-            else:
-                logger.info("Skipping test set vocabulary expansion (cross-region mode: empty test set)")
-
-            logger.info(f"\nVocabulary expansion complete:")
-            logger.info(f"  Final shape: ({train_data.n_obs:,}, {train_data.n_vars:,})")
-            logger.info(f"  Coverage: {vocab_expansion_report['coverage']:.1%}")
-            logger.info(f"  Zero-padded genes: {vocab_expansion_report['zero_padded_genes']:,}")
-            logger.info(f"  Dropped OOV genes: {vocab_expansion_report['dropped_genes']:,}")
-
-            # Verify all splits have identical gene sets
-            assert train_data.n_vars == val_data.n_vars == test_data.n_vars, \
-                "Gene counts must be identical across splits!"
-            logger.info(f"Verified: All splits have identical {train_data.n_vars:,} genes")
-
+            train_data, val_data, test_data, vocab_expansion_report = expand_splits_to_vocab(
+                train_data, val_data, test_data, args.genemap
+            )
         except FileNotFoundError as e:
             logger.error(f"Genemap file not found: {e}")
             return False
@@ -1112,32 +1143,9 @@ def main():
         logger.info("STEP 7: Selecting Highly Variable Genes")
         logger.info("=" * 80)
         try:
-            logger.info(f"Selecting {args.n_hvgs} HVGs from normalized training data...")
-            train_data = select_hvgs(train_data, n_hvgs=args.n_hvgs)
-            hvg_genes = train_data.var_names.copy()
-
-            logger.info(f"Selected {len(hvg_genes)} HVGs from training set")
-            logger.info("Subsetting validation and test sets to use the same genes...")
-
-            # Subset val and test to use the SAME genes as training
-            val_data = val_data[:, hvg_genes].copy()
-            logger.info(f"Val data subset to {val_data.n_vars} genes")
-
-            if test_data.n_obs > 0:
-                test_data = test_data[:, hvg_genes].copy()
-                logger.info(f"Test data subset to {test_data.n_vars} genes")
-
-                # Verify gene overlap
-                assert set(train_data.var_names) == set(val_data.var_names) == set(test_data.var_names), \
-                    "Gene sets must be identical across splits!"
-                logger.info(f"Verified: All splits use identical {len(hvg_genes)} genes")
-            else:
-                # Verify train and val only (cross-region mode)
-                assert set(train_data.var_names) == set(val_data.var_names), \
-                    "Gene sets must be identical for train and val!"
-                logger.info(f"Verified: Train and val use identical {len(hvg_genes)} genes (cross-region mode)")
-                logger.info("Skipping test set HVG subsetting (cross-region mode: empty test set)")
-
+            train_data, val_data, test_data = subset_splits_to_hvgs(
+                train_data, val_data, test_data, n_hvgs=args.n_hvgs
+            )
         except Exception as e:
             logger.error(f"Failed to select HVGs: {e}")
             return False
