@@ -2,23 +2,25 @@
 """
 SEAAD Data Preparation Pipeline for Oligodendrocyte AD Classification.
 
-This script prepares the SEAAD A9 RNAseq dataset for binary classification:
-  - Label 1 (High): Cells from donors with High AD Neuropathologic Change (ADNC)
+This script prepares the SEAAD RNAseq dataset for 4-class ADNC classification:
   - Label 0 (Not AD): Cells from donors with Not AD status
+  - Label 1 (Low): Cells from donors with Low ADNC
+  - Label 2 (Intermediate): Cells from donors with Intermediate ADNC
+  - Label 3 (High): Cells from donors with High ADNC
 
 Pipeline steps:
   1. Load raw SEAAD h5ad file (memory-efficient backed mode)
   2. Filter for Oligodendrocyte cells only
-  3. Filter for High and Not AD categories (exclude Low, Intermediate)
-  4. Create binary labels
+  3. Keep all 4 ADNC categories (Not AD, Low, Intermediate, High)
+  4. Create 4-class labels
   5. Perform donor-level stratified train/val/test split (prevents data leakage)
   6. Normalize each split independently (library-size + log1p)
   7. Select highly variable genes from training data only
   8. Save processed datasets to output directory
 
-Output format compatible with train_mlp.py and train_transformer.py:
+Output format compatible with train_cellfm.py, train_mlp.py and train_transformer.py:
   - train.h5ad, val.h5ad, test.h5ad
-  - obs["label"]: Binary labels (0 or 1)
+  - obs["label"]: 4-class labels (0, 1, 2, or 3)
   - Metadata columns preserved for --use-metadata option
 
 Usage:
@@ -201,7 +203,7 @@ def load_filtered_data(
         cell_type: Cell type to filter for
         cell_type_column: Column name for cell type
         adnc_column: Column name for ADNC status
-        exclude_categories: ADNC categories to exclude
+        exclude_categories: ADNC categories to exclude (default: empty list for 4-class)
 
     Returns:
         Tuple of (AnnData object, label_mapping)
@@ -210,10 +212,10 @@ def load_filtered_data(
     from scipy import sparse
 
     if exclude_categories is None:
-        exclude_categories = ["Low", "Intermediate"]
+        exclude_categories = []  # Keep all 4 ADNC classes by default
 
     logger.info(f"Loading SEAAD dataset from {input_path}")
-    logger.info(f"Pre-filtering for: {cell_type} cells with High/Not AD status")
+    logger.info(f"Pre-filtering for: {cell_type} cells with all ADNC categories")
 
     with h5py.File(input_path, 'r') as f:
         # Step 1: Read metadata
@@ -241,7 +243,7 @@ def load_filtered_data(
         # ADNC filter
         adnc_mask = ~obs[adnc_column].isin(exclude_categories)
         n_adnc = adnc_mask.sum()
-        logger.info(f"  High/Not AD cells: {n_adnc:,}")
+        logger.info(f"  Cells after ADNC filter: {n_adnc:,}")
 
         # Combined filter
         keep_mask = cell_type_mask & adnc_mask
@@ -329,12 +331,11 @@ def load_filtered_data(
     # Step 4: Filter obs to kept cells (using valid_cell_indices which excludes corrupted rows)
     obs_filtered = obs.iloc[valid_cell_indices].copy().reset_index(drop=True)
 
-    # Step 5: Create labels
-    labels = (obs_filtered[adnc_column] == "High").astype(int)
+    # Step 5: Create 4-class labels
+    label_mapping = {"Not AD": 0, "Low": 1, "Intermediate": 2, "High": 3}
+    labels = obs_filtered[adnc_column].map(label_mapping)
     obs_filtered["label"] = labels
-    obs_filtered["label_name"] = labels.map({0: "Not AD", 1: "High"})
-
-    label_mapping = {"Not AD": 0, "High": 1}
+    obs_filtered["label_name"] = obs_filtered[adnc_column]  # Keep original ADNC names
 
     # Create AnnData
     adata = ad.AnnData(X=X, obs=obs_filtered, var=var)
@@ -389,21 +390,24 @@ def filter_adnc_and_create_labels(
     exclude_categories: Optional[List[str]] = None,
 ) -> Tuple:
     """
-    Filter for High and Not AD categories and create binary labels.
+    Filter ADNC categories and create 4-class labels.
 
     Args:
         adata: AnnData object
         adnc_column: Column name for ADNC status
-        exclude_categories: Categories to exclude (default: ['Low', 'Intermediate'])
+        exclude_categories: Categories to exclude (default: empty list for 4-class)
 
     Returns:
         Tuple of (filtered AnnData, label mapping)
     """
     if exclude_categories is None:
-        exclude_categories = ["Low", "Intermediate"]
+        exclude_categories = []  # Keep all 4 ADNC classes by default
 
     logger.info(f"Creating labels from column '{adnc_column}'")
-    logger.info(f"Excluding categories: {exclude_categories}")
+    if exclude_categories:
+        logger.info(f"Excluding categories: {exclude_categories}")
+    else:
+        logger.info("Keeping all 4 ADNC classes: Not AD, Low, Intermediate, High")
 
     # Verify column exists
     if adnc_column not in adata.obs:
@@ -416,19 +420,22 @@ def filter_adnc_and_create_labels(
     logger.info("ADNC value distribution before filtering:")
     logger.info(adata.obs[adnc_column].value_counts().to_string())
 
-    # Filter out excluded categories
-    logger.info("Filtering by ADNC status...")
-    mask = ~adata.obs[adnc_column].isin(exclude_categories)
-    adata_filtered = adata[mask].copy()
+    # Filter out excluded categories (if any)
+    if exclude_categories:
+        logger.info("Filtering by ADNC status...")
+        mask = ~adata.obs[adnc_column].isin(exclude_categories)
+        adata_filtered = adata[mask].copy()
+        logger.info(f"Cells retained: {adata_filtered.n_obs:,} / {adata.n_obs:,}")
+    else:
+        adata_filtered = adata.copy()
+        logger.info(f"All {adata_filtered.n_obs:,} cells retained (no exclusions)")
 
-    logger.info(f"Cells retained: {adata_filtered.n_obs:,} / {adata.n_obs:,}")
-
-    # Create binary labels: High=1, Not AD=0
-    label_mapping = {"Not AD": 0, "High": 1}
-    labels = (adata_filtered.obs[adnc_column] == "High").astype(int)
+    # Create 4-class labels: Not AD=0, Low=1, Intermediate=2, High=3
+    label_mapping = {"Not AD": 0, "Low": 1, "Intermediate": 2, "High": 3}
+    labels = adata_filtered.obs[adnc_column].map(label_mapping)
 
     adata_filtered.obs["label"] = labels
-    adata_filtered.obs["label_name"] = labels.map({0: "Not AD", 1: "High"})
+    adata_filtered.obs["label_name"] = adata_filtered.obs[adnc_column]  # Keep original names
 
     logger.info("\nLabel distribution:")
     logger.info(adata_filtered.obs["label_name"].value_counts().to_string())
@@ -492,8 +499,9 @@ def stratified_donor_split(
     logger.info(f"\nTotal unique donors: {len(donor_labels)}")
     logger.info("Donor-level label distribution:")
     label_dist = donor_labels["donor_label"].value_counts()
+    label_name_map = {"0": "Not AD", "1": "Low", "2": "Intermediate", "3": "High"}
     for label, count in label_dist.items():
-        label_name = "High" if label == "1" else "Not AD"
+        label_name = label_name_map.get(str(label), str(label))
         logger.info(f"  {label_name}: {count} donors")
 
     # Add cell count per donor for weighted stratification
@@ -525,63 +533,95 @@ def stratified_donor_split(
     logger.info(f"\nStratification key distribution:")
     logger.info(donor_labels["strat_key"].value_counts().to_string())
 
-    # First split: train+val vs test
-    try:
-        donors_train_val, donors_test = train_test_split(
-            donor_labels[donor_column],
-            test_size=test_ratio,
-            random_state=random_state,
-            stratify=donor_labels["strat_key"],
-        )
-    except ValueError as e:
-        logger.warning(f"Stratified split failed ({e}), falling back to label-only stratification")
-        donors_train_val, donors_test = train_test_split(
-            donor_labels[donor_column],
-            test_size=test_ratio,
-            random_state=random_state,
-            stratify=donor_labels["donor_label"],
-        )
+    # Handle cross-region mode (test_ratio=0)
+    if test_ratio == 0:
+        logger.info("\nCross-region mode: No test split (test_ratio=0)")
+        logger.info("  Test data should come from a different region")
 
-    # Second split: train vs val
-    val_size = val_ratio / (train_ratio + val_ratio)
-    train_val_labels = donor_labels[donor_labels[donor_column].isin(donors_train_val)]
+        # Only split into train and val
+        val_size = val_ratio / (train_ratio + val_ratio)
 
-    try:
-        donors_train, donors_val = train_test_split(
-            train_val_labels[donor_column],
-            test_size=val_size,
-            random_state=random_state,
-            stratify=train_val_labels["strat_key"],
-        )
-    except ValueError as e:
-        logger.warning(f"Stratified split failed ({e}), falling back to label-only stratification")
-        donors_train, donors_val = train_test_split(
-            train_val_labels[donor_column],
-            test_size=val_size,
-            random_state=random_state,
-            stratify=train_val_labels["donor_label"],
-        )
+        try:
+            donors_train, donors_val = train_test_split(
+                donor_labels[donor_column],
+                test_size=val_size,
+                random_state=random_state,
+                stratify=donor_labels["strat_key"],
+            )
+        except ValueError as e:
+            logger.warning(f"Stratified split failed ({e}), falling back to label-only stratification")
+            donors_train, donors_val = train_test_split(
+                donor_labels[donor_column],
+                test_size=val_size,
+                random_state=random_state,
+                stratify=donor_labels["donor_label"],
+            )
+
+        donors_test = pd.Series([], dtype=str)  # Empty test set
+    else:
+        # First split: train+val vs test
+        try:
+            donors_train_val, donors_test = train_test_split(
+                donor_labels[donor_column],
+                test_size=test_ratio,
+                random_state=random_state,
+                stratify=donor_labels["strat_key"],
+            )
+        except ValueError as e:
+            logger.warning(f"Stratified split failed ({e}), falling back to label-only stratification")
+            donors_train_val, donors_test = train_test_split(
+                donor_labels[donor_column],
+                test_size=test_ratio,
+                random_state=random_state,
+                stratify=donor_labels["donor_label"],
+            )
+
+        # Second split: train vs val
+        val_size = val_ratio / (train_ratio + val_ratio)
+        train_val_labels = donor_labels[donor_labels[donor_column].isin(donors_train_val)]
+
+        try:
+            donors_train, donors_val = train_test_split(
+                train_val_labels[donor_column],
+                test_size=val_size,
+                random_state=random_state,
+                stratify=train_val_labels["strat_key"],
+            )
+        except ValueError as e:
+            logger.warning(f"Stratified split failed ({e}), falling back to label-only stratification")
+            donors_train, donors_val = train_test_split(
+                train_val_labels[donor_column],
+                test_size=val_size,
+                random_state=random_state,
+                stratify=train_val_labels["donor_label"],
+            )
 
     # Create splits
     logger.info("\nCreating train/val/test splits...")
     train_adata = adata[adata.obs[donor_column].isin(donors_train)].copy()
     val_adata = adata[adata.obs[donor_column].isin(donors_val)].copy()
-    test_adata = adata[adata.obs[donor_column].isin(donors_test)].copy()
+
+    if len(donors_test) > 0:
+        test_adata = adata[adata.obs[donor_column].isin(donors_test)].copy()
+        logger.info(f"Test set:  {test_adata.n_obs:,} cells from {donors_test.nunique()} donors")
+    else:
+        # Create empty test set for cross-region mode
+        test_adata = adata[0:0].copy()  # Empty AnnData with same structure
+        logger.info("Test set:  0 cells (cross-region mode: use separate region for testing)")
 
     logger.info(f"Train set: {train_adata.n_obs:,} cells from {donors_train.nunique()} donors")
     logger.info(f"Val set:   {val_adata.n_obs:,} cells from {donors_val.nunique()} donors")
-    logger.info(f"Test set:  {test_adata.n_obs:,} cells from {donors_test.nunique()} donors")
 
     # Validate label distributions
     logger.info("\n" + "=" * 60)
     logger.info("LABEL DISTRIBUTION VALIDATION")
     logger.info("=" * 60)
 
-    for split_name, split_data in [
-        ("Train", train_adata),
-        ("Val", val_adata),
-        ("Test", test_adata),
-    ]:
+    splits_to_validate = [("Train", train_adata), ("Val", val_adata)]
+    if test_adata.n_obs > 0:
+        splits_to_validate.append(("Test", test_adata))
+
+    for split_name, split_data in splits_to_validate:
         label_dist = split_data.obs["label_name"].value_counts()
         label_ratios = label_dist / label_dist.sum()
 
@@ -589,12 +629,17 @@ def stratified_donor_split(
         logger.info(f"  Counts: {label_dist.to_dict()}")
         logger.info(f"  Ratios: {dict((k, f'{v:.1%}') for k, v in label_ratios.items())}")
 
-        # Check for single-class splits
+        # Check for insufficient classes (warn if less than expected 4 classes)
         if len(label_dist) < 2:
             raise ValueError(
                 f"CRITICAL ERROR: {split_name} set has only one class!\n"
                 f"Current distribution: {label_dist.to_dict()}\n"
                 f"This will cause invalid evaluation."
+            )
+        elif len(label_dist) < 4:
+            logger.warning(
+                f"WARNING: {split_name} set has only {len(label_dist)} classes "
+                f"(expected 4). This may affect evaluation metrics."
             )
 
     return train_adata, val_adata, test_adata
@@ -879,13 +924,18 @@ def main():
         logger.error(f"Split ratios must sum to 1.0, got {total_ratio}")
         return False
 
+    # Warn about cross-region mode
+    if args.test_ratio == 0:
+        logger.info("NOTE: Cross-region mode enabled (test_ratio=0)")
+        logger.info("      Test data should come from a different region")
+
     logger.info("=" * 80)
     logger.info("SEAAD DATA PREPARATION PIPELINE")
     logger.info("=" * 80)
     logger.info(f"\nInput path: {args.input_path}")
     logger.info(f"Output directory: {args.output_dir}")
     logger.info(f"Cell type: {args.cell_type}")
-    logger.info(f"Binary target: High (1) vs Not AD (0)")
+    logger.info(f"4-class ADNC target: Not AD (0), Low (1), Intermediate (2), High (3)")
     logger.info(f"Split ratios: train={args.train_ratio}, val={args.val_ratio}, test={args.test_ratio}")
     if args.foundation_model_mode:
         logger.info(f"Mode: FOUNDATION MODEL MODE (expand to full genemap vocabulary)")
@@ -914,14 +964,14 @@ def main():
     logger.info("STEP 1-3: Loading and Filtering Data (Memory-Efficient)")
     logger.info("=" * 80)
     logger.info(f"  Cell type filter: {args.cell_type}")
-    logger.info(f"  ADNC filter: Keep High and Not AD only")
+    logger.info(f"  ADNC filter: Keep all 4 classes (Not AD, Low, Intermediate, High)")
     try:
         adata, label_mapping = load_filtered_data(
             args.input_path,
             cell_type=args.cell_type,
             cell_type_column="Subclass",
             adnc_column="ADNC",
-            exclude_categories=["Low", "Intermediate"],
+            exclude_categories=[],  # Keep all 4 ADNC classes
         )
     except Exception as e:
         logger.error(f"Failed to load/filter data: {e}")
@@ -1086,11 +1136,16 @@ def main():
     try:
         train_path = str(output_dir / "train.h5ad")
         val_path = str(output_dir / "val.h5ad")
-        test_path = str(output_dir / "test.h5ad")
 
         save_processed(train_data, train_path)
         save_processed(val_data, val_path)
-        save_processed(test_data, test_path)
+
+        # Only save test set if it has data (cross-region mode may have empty test)
+        if test_data.n_obs > 0:
+            test_path = str(output_dir / "test.h5ad")
+            save_processed(test_data, test_path)
+        else:
+            logger.info("Skipping test.h5ad (cross-region mode: test_ratio=0)")
 
     except Exception as e:
         logger.error(f"Failed to save processed data: {e}")
@@ -1102,7 +1157,9 @@ def main():
         "output_dir": str(output_dir),
         "cell_type": args.cell_type,
         "label_mapping": label_mapping,
+        "num_classes": 4,
         "foundation_model_mode": args.foundation_model_mode,
+        "cross_region_mode": args.test_ratio == 0,
         "split_ratios": {
             "train": args.train_ratio,
             "val": args.val_ratio,
@@ -1119,12 +1176,17 @@ def main():
             "n_genes": val_data.n_vars,
             "label_distribution": val_data.obs["label_name"].value_counts().to_dict(),
         },
-        "test": {
+    }
+
+    # Add test set info only if it has data
+    if test_data.n_obs > 0:
+        report["test"] = {
             "n_cells": test_data.n_obs,
             "n_genes": test_data.n_vars,
             "label_distribution": test_data.obs["label_name"].value_counts().to_dict(),
-        },
-    }
+        }
+    else:
+        report["test"] = {"note": "Cross-region mode: use separate region for testing"}
 
     # Add mode-specific info to report
     if args.foundation_model_mode:
@@ -1154,7 +1216,7 @@ def main():
     logger.info("=" * 80)
     logger.info(f"\nSummary:")
     logger.info(f"  Cell type: {args.cell_type}")
-    logger.info(f"  Binary classification: High (1) vs Not AD (0)")
+    logger.info(f"  4-class ADNC classification: Not AD (0), Low (1), Intermediate (2), High (3)")
     if args.foundation_model_mode:
         logger.info(f"\n  Foundation Model Mode: ENABLED")
         logger.info(f"    Vocabulary size: {vocab_expansion_report['vocab_size']:,}")
@@ -1170,8 +1232,11 @@ def main():
     logger.info(f"    Label distribution: {train_data.obs['label_name'].value_counts().to_dict()}")
     logger.info(f"\n  Val:   {val_data.n_obs:,} cells x {val_data.n_vars:,} genes")
     logger.info(f"    Label distribution: {val_data.obs['label_name'].value_counts().to_dict()}")
-    logger.info(f"\n  Test:  {test_data.n_obs:,} cells x {test_data.n_vars:,} genes")
-    logger.info(f"    Label distribution: {test_data.obs['label_name'].value_counts().to_dict()}")
+    if test_data.n_obs > 0:
+        logger.info(f"\n  Test:  {test_data.n_obs:,} cells x {test_data.n_vars:,} genes")
+        logger.info(f"    Label distribution: {test_data.obs['label_name'].value_counts().to_dict()}")
+    else:
+        logger.info(f"\n  Test:  Cross-region mode (use separate region for testing)")
     logger.info(f"\nProcessed data saved to: {output_dir}")
     logger.info(f"\nNext steps:")
     if args.foundation_model_mode:

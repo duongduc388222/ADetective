@@ -3,6 +3,8 @@
 Train CellFM classifier for oligodendrocyte AD classification.
 
 Finetunes CellFM foundation model backbone with a classification head.
+Supports 4-class ADNC classification (Not AD, Low, Intermediate, High)
+and cross-region validation.
 
 This script:
 1. Loads vocab-aligned h5ad files (prepared with --foundation-model-mode)
@@ -14,10 +16,18 @@ This script:
 7. Saves results and checkpoints
 
 Usage:
+    # Same-region training (single data directory)
     python scripts/train_cellfm.py \\
         --data-dir ./data/cellfm_prepared \\
         --backbone-path /path/to/cellfm_weights.pt \\
         --output-dir ./results/cellfm
+
+    # Cross-region training (separate train and test directories)
+    python scripts/train_cellfm.py \\
+        --train-dir ./data/cellfm_mtg \\
+        --test-dir ./data/cellfm_a9 \\
+        --backbone-path /path/to/cellfm_weights.pt \\
+        --output-dir ./results/cellfm_mtg_to_a9
 
     # With backbone freezing (recommended for small datasets)
     python scripts/train_cellfm.py \\
@@ -50,7 +60,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+from sklearn.metrics import (
+    accuracy_score, precision_score, recall_score, f1_score,
+    roc_auc_score, classification_report, confusion_matrix
+)
 import anndata as ad
 from scipy import sparse
 
@@ -218,7 +231,7 @@ class CellFMClassifier(nn.Module):
         self,
         backbone: nn.Module,
         hidden_dim: int = 1536,
-        num_classes: int = 2,
+        num_classes: int = 4,
         head_hidden: int = 512,
         dropout: float = 0.3,
         freeze_backbone: bool = True,
@@ -229,7 +242,7 @@ class CellFMClassifier(nn.Module):
         Args:
             backbone: Pretrained CellFM encoder
             hidden_dim: Output dimension of backbone (default: 1536)
-            num_classes: Number of output classes (default: 2 for binary)
+            num_classes: Number of output classes (default: 4 for ADNC)
             head_hidden: Hidden dimension in classification head
             dropout: Dropout rate in classification head
             freeze_backbone: If True, freeze backbone parameters
@@ -480,9 +493,13 @@ class CellFMTrainer:
 
         return avg_loss, accuracy
 
-    def validate(self, val_loader) -> Tuple[float, float, Dict]:
+    def validate(self, val_loader, num_classes: int = 4) -> Tuple[float, float, Dict]:
         """
         Validate model.
+
+        Args:
+            val_loader: Validation dataloader
+            num_classes: Number of classes for multi-class metrics
 
         Returns:
             Tuple of (average_loss, accuracy, metrics_dict)
@@ -518,24 +535,51 @@ class CellFMTrainer:
 
                 total_loss += loss.item()
                 preds = torch.argmax(logits, dim=1)
-                probs = torch.softmax(logits, dim=1)[:, 1]
+                probs = torch.softmax(logits, dim=1)  # (batch, num_classes)
 
                 all_preds.extend(preds.cpu().numpy())
-                all_probs.extend(probs.cpu().numpy())
+                all_probs.append(probs.cpu().numpy())
                 all_labels.extend(y.cpu().numpy())
 
         # Close progress bar
         if self._is_main_process() and hasattr(pbar, 'close'):
             pbar.close()
 
+        # Concatenate all probabilities
+        all_probs = np.vstack(all_probs)  # (N, num_classes)
+
         avg_loss = total_loss / len(val_loader)
+
+        # Multi-class metrics
+        label_names = ["Not AD", "Low", "Intermediate", "High"][:num_classes]
+
         metrics = {
             "accuracy": accuracy_score(all_labels, all_preds),
-            "precision": precision_score(all_labels, all_preds, zero_division=0),
-            "recall": recall_score(all_labels, all_preds, zero_division=0),
-            "f1": f1_score(all_labels, all_preds, zero_division=0),
-            "roc_auc": roc_auc_score(all_labels, all_probs) if len(set(all_labels)) > 1 else 0.0,
+            "macro_f1": f1_score(all_labels, all_preds, average='macro', zero_division=0),
+            "weighted_f1": f1_score(all_labels, all_preds, average='weighted', zero_division=0),
+            "macro_precision": precision_score(all_labels, all_preds, average='macro', zero_division=0),
+            "macro_recall": recall_score(all_labels, all_preds, average='macro', zero_division=0),
+            "per_class_f1": f1_score(all_labels, all_preds, average=None, zero_division=0).tolist(),
+            "confusion_matrix": confusion_matrix(all_labels, all_preds).tolist(),
         }
+
+        # Add ROC-AUC (one-vs-rest for multi-class)
+        try:
+            if len(set(all_labels)) > 1:
+                metrics["roc_auc_ovr"] = roc_auc_score(all_labels, all_probs, multi_class='ovr', average='macro')
+        except ValueError:
+            metrics["roc_auc_ovr"] = 0.0
+
+        # Add classification report
+        metrics["classification_report"] = classification_report(
+            all_labels, all_preds,
+            target_names=label_names,
+            output_dict=True,
+            zero_division=0,
+        )
+
+        # Use macro_f1 as the primary metric for consistency
+        metrics["f1"] = metrics["macro_f1"]
 
         return avg_loss, metrics["accuracy"], metrics
 
@@ -614,6 +658,7 @@ class CellFMLightningModule(pl.LightningModule):
     PyTorch Lightning module for CellFM finetuning.
 
     Handles training loop, validation, metrics, and optimization.
+    Supports multi-class (4-class ADNC) classification.
     """
 
     def __init__(
@@ -622,6 +667,7 @@ class CellFMLightningModule(pl.LightningModule):
         learning_rate: float = 1e-4,
         weight_decay: float = 0.01,
         class_weights: Optional[torch.Tensor] = None,
+        num_classes: int = 4,
     ):
         """
         Initialize Lightning module.
@@ -631,11 +677,13 @@ class CellFMLightningModule(pl.LightningModule):
             learning_rate: Learning rate for optimizer
             weight_decay: Weight decay for AdamW
             class_weights: Optional class weights for imbalanced data
+            num_classes: Number of classes (default: 4 for ADNC)
         """
         super().__init__()
         self.model = model
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
+        self.num_classes = num_classes
 
         # Store class weights as buffer (not a parameter)
         if class_weights is not None:
@@ -646,19 +694,26 @@ class CellFMLightningModule(pl.LightningModule):
         # Loss function with optional class weights
         self.criterion = nn.CrossEntropyLoss(weight=self.class_weights)
 
-        # Metrics - separate instances for each phase
-        self.train_acc = Accuracy(task="binary")
-        self.val_acc = Accuracy(task="binary")
-        self.val_precision = Precision(task="binary")
-        self.val_recall = Recall(task="binary")
-        self.val_f1 = F1Score(task="binary")
-        self.val_auroc = AUROC(task="binary")
+        # Metrics - multi-class configuration
+        metric_task = "multiclass"
+        metric_kwargs = {"task": metric_task, "num_classes": num_classes}
 
-        self.test_acc = Accuracy(task="binary")
-        self.test_precision = Precision(task="binary")
-        self.test_recall = Recall(task="binary")
-        self.test_f1 = F1Score(task="binary")
-        self.test_auroc = AUROC(task="binary")
+        # Training metrics
+        self.train_acc = Accuracy(**metric_kwargs)
+
+        # Validation metrics
+        self.val_acc = Accuracy(**metric_kwargs)
+        self.val_precision = Precision(**metric_kwargs, average='macro')
+        self.val_recall = Recall(**metric_kwargs, average='macro')
+        self.val_f1 = F1Score(**metric_kwargs, average='macro')
+        self.val_auroc = AUROC(**metric_kwargs, average='macro')
+
+        # Test metrics
+        self.test_acc = Accuracy(**metric_kwargs)
+        self.test_precision = Precision(**metric_kwargs, average='macro')
+        self.test_recall = Recall(**metric_kwargs, average='macro')
+        self.test_f1 = F1Score(**metric_kwargs, average='macro')
+        self.test_auroc = AUROC(**metric_kwargs, average='macro')
 
         # Save hyperparameters (exclude model to avoid serialization issues)
         self.save_hyperparameters(ignore=["model", "class_weights"])
@@ -691,14 +746,14 @@ class CellFMLightningModule(pl.LightningModule):
 
         # Compute predictions and probabilities
         preds = torch.argmax(logits, dim=1)
-        probs = torch.softmax(logits, dim=1)[:, 1]
+        probs = torch.softmax(logits, dim=1)  # (batch, num_classes) for multi-class
 
         # Update metrics
         self.val_acc(preds, y)
         self.val_precision(preds, y)
         self.val_recall(preds, y)
         self.val_f1(preds, y)
-        self.val_auroc(probs, y)
+        self.val_auroc(probs, y)  # Multi-class AUROC expects full probability matrix
 
         # Log metrics
         self.log("val_loss", loss, prog_bar=True, on_step=False, on_epoch=True)
@@ -716,14 +771,14 @@ class CellFMLightningModule(pl.LightningModule):
 
         # Compute predictions and probabilities
         preds = torch.argmax(logits, dim=1)
-        probs = torch.softmax(logits, dim=1)[:, 1]
+        probs = torch.softmax(logits, dim=1)  # (batch, num_classes) for multi-class
 
         # Update metrics
         self.test_acc(preds, y)
         self.test_precision(preds, y)
         self.test_recall(preds, y)
         self.test_f1(preds, y)
-        self.test_auroc(probs, y)
+        self.test_auroc(probs, y)  # Multi-class AUROC expects full probability matrix
 
         # Log metrics
         self.log("test_loss", loss, on_step=False, on_epoch=True)
@@ -784,8 +839,20 @@ Examples:
     parser.add_argument(
         "--data-dir",
         type=str,
-        required=True,
-        help="Directory with train.h5ad, val.h5ad, test.h5ad (prepared with --foundation-model-mode)",
+        default=None,
+        help="Directory with train.h5ad, val.h5ad, test.h5ad (same-region mode)",
+    )
+    parser.add_argument(
+        "--train-dir",
+        type=str,
+        default=None,
+        help="Training data directory (cross-region mode: contains train.h5ad, val.h5ad)",
+    )
+    parser.add_argument(
+        "--test-dir",
+        type=str,
+        default=None,
+        help="Test data directory (cross-region mode: contains train.h5ad to use as test set)",
     )
     parser.add_argument(
         "--backbone-path",
@@ -804,6 +871,12 @@ Examples:
         type=str,
         default="./results/cellfm",
         help="Directory to save results and checkpoints (default: ./results/cellfm)",
+    )
+    parser.add_argument(
+        "--num-classes",
+        type=int,
+        default=4,
+        help="Number of output classes (default: 4 for ADNC)",
     )
 
     # Training arguments
@@ -917,15 +990,42 @@ def main():
         logger.error("Or use --use-accelerate for Accelerate-based training")
         return False
 
+    # Validate data directory arguments
+    cross_region_mode = args.train_dir is not None and args.test_dir is not None
+    same_region_mode = args.data_dir is not None
+
+    if not cross_region_mode and not same_region_mode:
+        logger.error("Either --data-dir OR both --train-dir and --test-dir must be provided")
+        return False
+
+    if cross_region_mode and same_region_mode:
+        logger.warning("Both --data-dir and --train-dir/--test-dir provided. Using cross-region mode.")
+
     # Setup paths
-    data_dir = Path(args.data_dir)
+    if cross_region_mode:
+        train_dir = Path(args.train_dir)
+        test_dir = Path(args.test_dir)
+        data_dir = train_dir  # For logging compatibility
+        logger.info("\n*** CROSS-REGION MODE ***")
+        logger.info(f"  Training region: {train_dir}")
+        logger.info(f"  Test region: {test_dir}")
+    else:
+        data_dir = Path(args.data_dir)
+        train_dir = data_dir
+        test_dir = data_dir
+
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info(f"\nConfiguration:")
-    logger.info(f"  Data directory: {data_dir}")
+    if cross_region_mode:
+        logger.info(f"  Train directory: {train_dir}")
+        logger.info(f"  Test directory: {test_dir}")
+    else:
+        logger.info(f"  Data directory: {data_dir}")
     logger.info(f"  Backbone path: {args.backbone_path}")
     logger.info(f"  Output directory: {output_dir}")
+    logger.info(f"  Num classes: {args.num_classes}")
     logger.info(f"  Freeze backbone: {args.freeze_backbone}")
     logger.info(f"  Batch size: {args.batch_size}")
     logger.info(f"  Learning rate: {args.learning_rate}")
@@ -945,9 +1045,24 @@ def main():
     logger.info("=" * 80)
 
     try:
-        train_dataset = ScanpyDataset(data_dir / "train.h5ad")
-        val_dataset = ScanpyDataset(data_dir / "val.h5ad")
-        test_dataset = ScanpyDataset(data_dir / "test.h5ad")
+        if cross_region_mode:
+            # Cross-region mode: train/val from train_dir, test from test_dir
+            logger.info(f"Loading training data from: {train_dir}")
+            train_dataset = ScanpyDataset(train_dir / "train.h5ad")
+            val_dataset = ScanpyDataset(train_dir / "val.h5ad")
+
+            logger.info(f"Loading test data from: {test_dir}")
+            # In cross-region mode, use all data from test region (train.h5ad)
+            test_h5ad_path = test_dir / "train.h5ad"
+            if not test_h5ad_path.exists():
+                # Fall back to test.h5ad if train.h5ad doesn't exist
+                test_h5ad_path = test_dir / "test.h5ad"
+            test_dataset = ScanpyDataset(test_h5ad_path)
+        else:
+            # Same-region mode: all from data_dir
+            train_dataset = ScanpyDataset(data_dir / "train.h5ad")
+            val_dataset = ScanpyDataset(data_dir / "val.h5ad")
+            test_dataset = ScanpyDataset(data_dir / "test.h5ad")
     except FileNotFoundError as e:
         logger.error(f"Data file not found: {e}")
         logger.error("Make sure you've run prepare_seaad.py with --foundation-model-mode first")
@@ -1034,7 +1149,7 @@ def main():
     model = CellFMClassifier(
         backbone=backbone,
         hidden_dim=hidden_dim,
-        num_classes=2,
+        num_classes=args.num_classes,
         head_hidden=args.head_hidden,
         dropout=args.dropout,
         freeze_backbone=args.freeze_backbone,
@@ -1124,8 +1239,12 @@ def main():
 
         results = {
             "config": {
-                "data_dir": str(data_dir),
+                "data_dir": str(data_dir) if not cross_region_mode else None,
+                "train_dir": str(train_dir) if cross_region_mode else None,
+                "test_dir": str(test_dir) if cross_region_mode else None,
+                "cross_region_mode": cross_region_mode,
                 "backbone_path": args.backbone_path,
+                "num_classes": args.num_classes,
                 "freeze_backbone": args.freeze_backbone,
                 "hidden_dim": hidden_dim,
                 "head_hidden": args.head_hidden,
@@ -1166,6 +1285,7 @@ def main():
             learning_rate=args.learning_rate,
             weight_decay=args.weight_decay,
             class_weights=class_weights,
+            num_classes=args.num_classes,
         )
 
         # Step 7: Setup callbacks
@@ -1225,8 +1345,12 @@ def main():
 
         results = {
             "config": {
-                "data_dir": str(data_dir),
+                "data_dir": str(data_dir) if not cross_region_mode else None,
+                "train_dir": str(train_dir) if cross_region_mode else None,
+                "test_dir": str(test_dir) if cross_region_mode else None,
+                "cross_region_mode": cross_region_mode,
                 "backbone_path": args.backbone_path,
+                "num_classes": args.num_classes,
                 "freeze_backbone": args.freeze_backbone,
                 "hidden_dim": hidden_dim,
                 "head_hidden": args.head_hidden,
@@ -1260,19 +1384,44 @@ def main():
     logger.info("=" * 80)
 
     if test_metrics:
-        logger.info(f"\nFinal Test Performance:")
+        logger.info(f"\nFinal Test Performance ({args.num_classes}-class):")
         # Handle both Lightning and Accelerate metric formats
         acc_key = "test_acc" if "test_acc" in test_metrics else "accuracy"
-        prec_key = "test_precision" if "test_precision" in test_metrics else "precision"
-        rec_key = "test_recall" if "test_recall" in test_metrics else "recall"
-        f1_key = "test_f1" if "test_f1" in test_metrics else "f1"
-        auc_key = "test_auroc" if "test_auroc" in test_metrics else "roc_auc"
+        prec_key = "test_precision" if "test_precision" in test_metrics else "macro_precision"
+        rec_key = "test_recall" if "test_recall" in test_metrics else "macro_recall"
+        f1_key = "test_f1" if "test_f1" in test_metrics else "macro_f1"
+        auc_key = "test_auroc" if "test_auroc" in test_metrics else "roc_auc_ovr"
 
-        logger.info(f"  Accuracy:  {test_metrics.get(acc_key, 'N/A'):.4f}")
-        logger.info(f"  Precision: {test_metrics.get(prec_key, 'N/A'):.4f}")
-        logger.info(f"  Recall:    {test_metrics.get(rec_key, 'N/A'):.4f}")
-        logger.info(f"  F1 Score:  {test_metrics.get(f1_key, 'N/A'):.4f}")
-        logger.info(f"  ROC-AUC:   {test_metrics.get(auc_key, 'N/A'):.4f}")
+        acc_val = test_metrics.get(acc_key)
+        prec_val = test_metrics.get(prec_key)
+        rec_val = test_metrics.get(rec_key)
+        f1_val = test_metrics.get(f1_key)
+        auc_val = test_metrics.get(auc_key)
+
+        logger.info(f"  Accuracy:        {acc_val:.4f}" if acc_val is not None else "  Accuracy: N/A")
+        logger.info(f"  Macro Precision: {prec_val:.4f}" if prec_val is not None else "  Macro Precision: N/A")
+        logger.info(f"  Macro Recall:    {rec_val:.4f}" if rec_val is not None else "  Macro Recall: N/A")
+        logger.info(f"  Macro F1 Score:  {f1_val:.4f}" if f1_val is not None else "  Macro F1 Score: N/A")
+        logger.info(f"  Macro ROC-AUC:   {auc_val:.4f}" if auc_val is not None else "  Macro ROC-AUC: N/A")
+
+        # Show per-class F1 if available (Accelerate mode)
+        if "per_class_f1" in test_metrics:
+            label_names = ["Not AD", "Low", "Intermediate", "High"][:args.num_classes]
+            logger.info(f"\n  Per-class F1:")
+            for i, (name, f1) in enumerate(zip(label_names, test_metrics["per_class_f1"])):
+                logger.info(f"    {name}: {f1:.4f}")
+
+        # Show confusion matrix if available
+        if "confusion_matrix" in test_metrics:
+            logger.info(f"\n  Confusion Matrix:")
+            cm = test_metrics["confusion_matrix"]
+            label_names = ["Not AD", "Low", "Intermediate", "High"][:args.num_classes]
+            logger.info(f"    Rows=True, Cols=Predicted")
+            header = "           " + "  ".join([f"{n[:6]:>6}" for n in label_names])
+            logger.info(header)
+            for i, row in enumerate(cm):
+                row_str = "  ".join([f"{v:>6}" for v in row])
+                logger.info(f"    {label_names[i]:>6}  {row_str}")
 
     logger.info(f"\nResults saved to: {output_dir}")
 
