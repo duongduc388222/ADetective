@@ -1052,8 +1052,11 @@ def main():
             logger.info("Normalizing validation set...")
             val_data = normalize_data(val_data, target_sum=args.target_sum)
 
-            logger.info("Normalizing test set...")
-            test_data = normalize_data(test_data, target_sum=args.target_sum)
+            if test_data.n_obs > 0:
+                logger.info("Normalizing test set...")
+                test_data = normalize_data(test_data, target_sum=args.target_sum)
+            else:
+                logger.info("Skipping test set normalization (cross-region mode: empty test set)")
 
             logger.info("All splits normalized independently")
         except Exception as e:
@@ -1078,8 +1081,11 @@ def main():
             logger.info("Expanding validation set to genemap vocabulary...")
             val_data, _ = expand_to_genemap_vocab(val_data, args.genemap)
 
-            logger.info("Expanding test set to genemap vocabulary...")
-            test_data, _ = expand_to_genemap_vocab(test_data, args.genemap)
+            if test_data.n_obs > 0:
+                logger.info("Expanding test set to genemap vocabulary...")
+                test_data, _ = expand_to_genemap_vocab(test_data, args.genemap)
+            else:
+                logger.info("Skipping test set vocabulary expansion (cross-region mode: empty test set)")
 
             logger.info(f"\nVocabulary expansion complete:")
             logger.info(f"  Final shape: ({train_data.n_obs:,}, {train_data.n_vars:,})")
@@ -1115,15 +1121,22 @@ def main():
 
             # Subset val and test to use the SAME genes as training
             val_data = val_data[:, hvg_genes].copy()
-            test_data = test_data[:, hvg_genes].copy()
-
             logger.info(f"Val data subset to {val_data.n_vars} genes")
-            logger.info(f"Test data subset to {test_data.n_vars} genes")
 
-            # Verify gene overlap
-            assert set(train_data.var_names) == set(val_data.var_names) == set(test_data.var_names), \
-                "Gene sets must be identical across splits!"
-            logger.info(f"Verified: All splits use identical {len(hvg_genes)} genes")
+            if test_data.n_obs > 0:
+                test_data = test_data[:, hvg_genes].copy()
+                logger.info(f"Test data subset to {test_data.n_vars} genes")
+
+                # Verify gene overlap
+                assert set(train_data.var_names) == set(val_data.var_names) == set(test_data.var_names), \
+                    "Gene sets must be identical across splits!"
+                logger.info(f"Verified: All splits use identical {len(hvg_genes)} genes")
+            else:
+                # Verify train and val only (cross-region mode)
+                assert set(train_data.var_names) == set(val_data.var_names), \
+                    "Gene sets must be identical for train and val!"
+                logger.info(f"Verified: Train and val use identical {len(hvg_genes)} genes (cross-region mode)")
+                logger.info("Skipping test set HVG subsetting (cross-region mode: empty test set)")
 
         except Exception as e:
             logger.error(f"Failed to select HVGs: {e}")
