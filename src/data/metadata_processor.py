@@ -50,22 +50,37 @@ class MetadataProcessor:
         logger.info("Fitting metadata processor on training data...")
 
         # Define feature groups based on actual h5ad column names
-        # NOTE: Removed Library Prep (79 batch categories - high dimensional noise)
-        # and Sequencing Method (batch effect, not biological signal)
+        #
+        # IMPORTANT: Avoid data leakage by NOT using features that directly
+        # measure or encode the ADNC label (Alzheimer's Disease pathology).
+        #
+        # REMOVED (cause data leakage):
+        # - "Cognitive Status" - directly related to AD diagnosis
+        # - "Amyloid (6E10+)" - directly measures amyloid plaques (AD pathology)
+        # - "Tau (AT8+)" - directly measures tau tangles (AD pathology)
+        #
+        # KEPT (acceptable predictors known before disease):
+        # - APOE Genotype - genetic risk factor (determined at birth)
+        # - Sex - biological variable
+        # - Age at Death - demographic
+        # - Years of Education - demographic (potential protective factor)
+        # - PMI - quality control metric (not related to AD)
+        # - GFAP, Alpha-Synuclein - borderline but kept for research purposes
+        #
         self.categorical_features = {
             "APOE Genotype": "APOE Genotype",  # Genetic risk factor for AD
             "Sex": "Sex",  # Sex-specific AD patterns
-            "Cognitive Status": "Cognitive Status",  # Directly related to AD diagnosis
+            # REMOVED: "Cognitive Status" - causes data leakage
         }
 
         self.continuous_features = {
             "Age at Death": "Age at Death",
             "Years of Education": "Years of education",
-            "Amyloid (6E10+)": "percent 6e10 positive area",
-            "Tau (AT8+)": "percent AT8 positive area",
-            "GFAP (Astrocytes)": "percent GFAP positive area",
-            "Alpha-Synuclein": "percent aSyn positive area",
-            "PMI (QC)": "PMI",
+            # REMOVED: "Amyloid (6E10+)" - directly measures AD pathology (data leakage)
+            # REMOVED: "Tau (AT8+)" - directly measures AD pathology (data leakage)
+            "GFAP (Astrocytes)": "percent GFAP positive area",  # Gliosis marker
+            "Alpha-Synuclein": "percent aSyn positive area",  # Lewy body marker
+            "PMI (QC)": "PMI",  # Quality control metric
         }
 
         # Fit categorical encoders (one-hot)

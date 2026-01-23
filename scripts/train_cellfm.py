@@ -67,6 +67,15 @@ from sklearn.metrics import (
 import anndata as ad
 from scipy import sparse
 
+# Import metadata processor for --use-metadata option
+try:
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from src.data.metadata_processor import MetadataProcessor
+    METADATA_AVAILABLE = True
+except ImportError:
+    METADATA_AVAILABLE = False
+
 # Optional imports - will be checked at runtime
 try:
     import pytorch_lightning as pl
@@ -126,14 +135,20 @@ class ScanpyDataset(Dataset):
     Dataset for loading vocab-aligned h5ad files.
 
     Handles sparse matrices efficiently by converting to dense only at access time.
+    Optionally includes processed metadata features.
     """
 
-    def __init__(self, h5ad_path: str):
+    def __init__(
+        self,
+        h5ad_path: str,
+        metadata_array: Optional[np.ndarray] = None,
+    ):
         """
         Initialize dataset from h5ad file.
 
         Args:
             h5ad_path: Path to h5ad file with gene expression and labels
+            metadata_array: Optional pre-processed metadata array (n_cells, n_metadata_features)
         """
         self.h5ad_path = h5ad_path
         logger.info(f"Loading dataset from {h5ad_path}")
@@ -154,10 +169,19 @@ class ScanpyDataset(Dataset):
         label_counts = self.adata.obs["label"].value_counts()
         logger.info(f"  Labels: {label_counts.to_dict()}")
 
+        # Store metadata if provided
+        self.metadata = metadata_array
+        self.use_metadata = metadata_array is not None
+        if self.use_metadata:
+            assert len(metadata_array) == self.n_cells, \
+                f"Metadata length ({len(metadata_array)}) must match n_cells ({self.n_cells})"
+            self.n_metadata = metadata_array.shape[1]
+            logger.info(f"  Metadata features: {self.n_metadata}")
+
     def __len__(self) -> int:
         return self.n_cells
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, ...]:
         """
         Get a single sample.
 
@@ -165,7 +189,8 @@ class ScanpyDataset(Dataset):
             idx: Sample index
 
         Returns:
-            Tuple of (gene_expression_tensor, label_tensor)
+            If use_metadata: Tuple of (gene_expression, metadata, label)
+            Else: Tuple of (gene_expression, label)
         """
         # Get gene expression - convert sparse to dense
         if self.is_sparse:
@@ -176,7 +201,11 @@ class ScanpyDataset(Dataset):
         # Get label
         y = int(self.adata.obs["label"].iloc[idx])
 
-        return torch.from_numpy(x), torch.tensor(y, dtype=torch.long)
+        if self.use_metadata:
+            meta = self.metadata[idx].astype(np.float32)
+            return torch.from_numpy(x), torch.from_numpy(meta), torch.tensor(y, dtype=torch.long)
+        else:
+            return torch.from_numpy(x), torch.tensor(y, dtype=torch.long)
 
 
 # =============================================================================
@@ -213,14 +242,15 @@ except ImportError:
 
 class CellFMClassifier(nn.Module):
     """
-    CellFM backbone + MLP classification head.
+    CellFM backbone + MLP classification head with optional metadata fusion.
 
     Architecture:
-        backbone(x) -> features (B, hidden_dim)
+        backbone(x) -> cell_embedding (B, hidden_dim)
+        [Optional: concat(cell_embedding, metadata) -> features (B, hidden_dim + n_metadata)]
         classifier(features) -> logits (B, num_classes)
 
     Classification head structure:
-        Linear(hidden_dim, head_hidden)
+        Linear(hidden_dim [+ n_metadata], head_hidden)
         -> LayerNorm(head_hidden)
         -> ReLU
         -> Dropout(dropout)
@@ -235,6 +265,7 @@ class CellFMClassifier(nn.Module):
         head_hidden: int = 512,
         dropout: float = 0.3,
         freeze_backbone: bool = True,
+        n_metadata: int = 0,
     ):
         """
         Initialize CellFM classifier.
@@ -246,11 +277,14 @@ class CellFMClassifier(nn.Module):
             head_hidden: Hidden dimension in classification head
             dropout: Dropout rate in classification head
             freeze_backbone: If True, freeze backbone parameters
+            n_metadata: Number of metadata features to concatenate (0 = no metadata)
         """
         super().__init__()
         self.backbone = backbone
         self.hidden_dim = hidden_dim
         self.freeze_backbone = freeze_backbone
+        self.n_metadata = n_metadata
+        self.use_metadata = n_metadata > 0
 
         # Freeze backbone if requested
         if freeze_backbone:
@@ -260,9 +294,16 @@ class CellFMClassifier(nn.Module):
             # Set to eval mode for frozen backbone
             self.backbone.eval()
 
+        # Classification head input dimension: cell embedding + optional metadata
+        classifier_input_dim = hidden_dim + n_metadata
+
+        if self.use_metadata:
+            logger.info(f"Metadata fusion enabled: {n_metadata} features")
+            logger.info(f"  Classifier input: {hidden_dim} (embedding) + {n_metadata} (metadata) = {classifier_input_dim}")
+
         # Classification head: Linear -> LayerNorm -> ReLU -> Dropout -> Linear
         self.classifier = nn.Sequential(
-            nn.Linear(hidden_dim, head_hidden),
+            nn.Linear(classifier_input_dim, head_hidden),
             nn.LayerNorm(head_hidden),
             nn.ReLU(),
             nn.Dropout(dropout),
@@ -290,12 +331,17 @@ class CellFMClassifier(nn.Module):
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        metadata: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """
         Forward pass.
 
         Args:
             x: Gene expression tensor (batch_size, n_genes)
+            metadata: Optional metadata tensor (batch_size, n_metadata)
 
         Returns:
             logits: Classification logits (batch_size, num_classes)
@@ -306,6 +352,12 @@ class CellFMClassifier(nn.Module):
                 features = self.backbone(x)
         else:
             features = self.backbone(x)
+
+        # Concatenate metadata if provided
+        if self.use_metadata:
+            if metadata is None:
+                raise ValueError("Model was initialized with n_metadata>0 but no metadata provided")
+            features = torch.cat([features, metadata], dim=1)
 
         # Classification head
         logits = self.classifier(features)
@@ -338,6 +390,7 @@ class CellFMTrainer:
         use_accelerate: bool = False,
         accelerator=None,
         class_weights: Optional[torch.Tensor] = None,
+        label_smoothing: float = 0.0,
     ):
         """
         Initialize trainer.
@@ -349,6 +402,7 @@ class CellFMTrainer:
             use_accelerate: Whether to use HuggingFace Accelerate
             accelerator: Accelerator instance if using Accelerate
             class_weights: Optional class weights for loss
+            label_smoothing: Label smoothing factor (default: 0.0)
         """
         self.model = model
         self.config = config
@@ -363,8 +417,8 @@ class CellFMTrainer:
             else:
                 class_weights = class_weights.to(device)
 
-        # Loss function
-        self.criterion = nn.CrossEntropyLoss(weight=class_weights)
+        # Loss function with optional label smoothing
+        self.criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=label_smoothing)
 
         # Create optimizer
         self.optimizer = self._create_optimizer()
@@ -442,15 +496,24 @@ class CellFMTrainer:
         else:
             pbar = enumerate(train_loader)
 
-        for batch_idx, (x, y) in pbar:
+        for batch_idx, batch in pbar:
+            # Unpack batch - may have 2 or 3 elements depending on metadata
+            if len(batch) == 3:
+                x, metadata, y = batch
+            else:
+                x, y = batch
+                metadata = None
+
             # Move to device if not using Accelerate
             if not self.use_accelerate:
                 x = x.to(self.device)
                 y = y.to(self.device)
+                if metadata is not None:
+                    metadata = metadata.to(self.device)
 
             # Forward pass
             self.optimizer.zero_grad()
-            logits = self.model(x)
+            logits = self.model(x, metadata=metadata)
             loss = self.criterion(logits, y)
 
             # Backward pass
@@ -525,12 +588,21 @@ class CellFMTrainer:
             pbar = val_loader
 
         with torch.no_grad():
-            for x, y in pbar:
+            for batch in pbar:
+                # Unpack batch - may have 2 or 3 elements depending on metadata
+                if len(batch) == 3:
+                    x, metadata, y = batch
+                else:
+                    x, y = batch
+                    metadata = None
+
                 if not self.use_accelerate:
                     x = x.to(self.device)
                     y = y.to(self.device)
+                    if metadata is not None:
+                        metadata = metadata.to(self.device)
 
-                logits = self.model(x)
+                logits = self.model(x, metadata=metadata)
                 loss = self.criterion(logits, y)
 
                 total_loss += loss.item()
@@ -664,10 +736,11 @@ class CellFMLightningModule(pl.LightningModule):
     def __init__(
         self,
         model: CellFMClassifier,
-        learning_rate: float = 1e-4,
+        learning_rate: float = 1e-5,
         weight_decay: float = 0.01,
         class_weights: Optional[torch.Tensor] = None,
         num_classes: int = 4,
+        label_smoothing: float = 0.0,
     ):
         """
         Initialize Lightning module.
@@ -678,6 +751,7 @@ class CellFMLightningModule(pl.LightningModule):
             weight_decay: Weight decay for AdamW
             class_weights: Optional class weights for imbalanced data
             num_classes: Number of classes (default: 4 for ADNC)
+            label_smoothing: Label smoothing factor (default: 0.0)
         """
         super().__init__()
         self.model = model
@@ -691,8 +765,8 @@ class CellFMLightningModule(pl.LightningModule):
         else:
             self.class_weights = None
 
-        # Loss function with optional class weights
-        self.criterion = nn.CrossEntropyLoss(weight=self.class_weights)
+        # Loss function with optional class weights and label smoothing
+        self.criterion = nn.CrossEntropyLoss(weight=self.class_weights, label_smoothing=label_smoothing)
 
         # Metrics - multi-class configuration
         metric_task = "multiclass"
@@ -718,14 +792,19 @@ class CellFMLightningModule(pl.LightningModule):
         # Save hyperparameters (exclude model to avoid serialization issues)
         self.save_hyperparameters(ignore=["model", "class_weights"])
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, metadata: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Forward pass."""
-        return self.model(x)
+        return self.model(x, metadata=metadata)
 
     def training_step(self, batch, batch_idx):
         """Training step."""
-        x, y = batch
-        logits = self(x)
+        # Unpack batch - may have 2 or 3 elements depending on metadata
+        if len(batch) == 3:
+            x, metadata, y = batch
+        else:
+            x, y = batch
+            metadata = None
+        logits = self(x, metadata=metadata)
         loss = self.criterion(logits, y)
 
         # Compute predictions for accuracy
@@ -740,8 +819,13 @@ class CellFMLightningModule(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         """Validation step."""
-        x, y = batch
-        logits = self(x)
+        # Unpack batch - may have 2 or 3 elements depending on metadata
+        if len(batch) == 3:
+            x, metadata, y = batch
+        else:
+            x, y = batch
+            metadata = None
+        logits = self(x, metadata=metadata)
         loss = self.criterion(logits, y)
 
         # Compute predictions and probabilities
@@ -765,8 +849,13 @@ class CellFMLightningModule(pl.LightningModule):
 
     def test_step(self, batch, batch_idx):
         """Test step."""
-        x, y = batch
-        logits = self(x)
+        # Unpack batch - may have 2 or 3 elements depending on metadata
+        if len(batch) == 3:
+            x, metadata, y = batch
+        else:
+            x, y = batch
+            metadata = None
+        logits = self(x, metadata=metadata)
         loss = self.criterion(logits, y)
 
         # Compute predictions and probabilities
@@ -889,14 +978,21 @@ Examples:
     parser.add_argument(
         "--learning-rate",
         type=float,
-        default=1e-4,
-        help="Learning rate for AdamW optimizer (default: 1e-4)",
+        default=1e-5,
+        help="Learning rate for classifier head (default: 1e-5, optimized for finetuning)",
+    )
+    parser.add_argument(
+        "--backbone-lr",
+        type=float,
+        default=None,
+        help="Learning rate for backbone (if different from --learning-rate). "
+             "Default: 1/10th of --learning-rate for full finetuning",
     )
     parser.add_argument(
         "--epochs",
         type=int,
-        default=15,
-        help="Maximum number of training epochs (default: 15)",
+        default=20,
+        help="Maximum number of training epochs (default: 20)",
     )
     parser.add_argument(
         "--weight-decay",
@@ -907,8 +1003,20 @@ Examples:
     parser.add_argument(
         "--patience",
         type=int,
-        default=5,
-        help="Early stopping patience (default: 5)",
+        default=7,
+        help="Early stopping patience (default: 7)",
+    )
+    parser.add_argument(
+        "--warmup-steps",
+        type=int,
+        default=100,
+        help="Number of warmup steps for learning rate scheduler (default: 100)",
+    )
+    parser.add_argument(
+        "--label-smoothing",
+        type=float,
+        default=0.1,
+        help="Label smoothing factor for CrossEntropyLoss (default: 0.1)",
     )
     parser.add_argument(
         "--num-workers",
@@ -953,6 +1061,14 @@ Examples:
         type=float,
         default=1.0,
         help="Gradient clipping value (default: 1.0)",
+    )
+
+    # Metadata arguments
+    parser.add_argument(
+        "--use-metadata",
+        action="store_true",
+        default=False,
+        help="Include donor metadata (APOE, Sex, Age) as additional features (default: False)",
     )
 
     # Accelerate arguments
@@ -1029,9 +1145,14 @@ def main():
     logger.info(f"  Freeze backbone: {args.freeze_backbone}")
     logger.info(f"  Batch size: {args.batch_size}")
     logger.info(f"  Learning rate: {args.learning_rate}")
+    if args.backbone_lr:
+        logger.info(f"  Backbone LR: {args.backbone_lr}")
     logger.info(f"  Epochs: {args.epochs}")
     logger.info(f"  Early stopping patience: {args.patience}")
+    logger.info(f"  Warmup steps: {args.warmup_steps}")
+    logger.info(f"  Label smoothing: {args.label_smoothing}")
     logger.info(f"  Use Accelerate: {args.use_accelerate}")
+    logger.info(f"  Use metadata: {args.use_metadata}")
 
     # Step 0: Check Flash Attention
     logger.info("\n" + "=" * 80)
@@ -1044,25 +1165,72 @@ def main():
     logger.info("STEP 1: Loading Datasets")
     logger.info("=" * 80)
 
+    # Initialize metadata variables
+    n_metadata = 0
+    train_meta, val_meta, test_meta = None, None, None
+    metadata_processor = None
+
     try:
         if cross_region_mode:
             # Cross-region mode: train/val from train_dir, test from test_dir
             logger.info(f"Loading training data from: {train_dir}")
-            train_dataset = ScanpyDataset(train_dir / "train.h5ad")
-            val_dataset = ScanpyDataset(train_dir / "val.h5ad")
+            train_h5ad_path = train_dir / "train.h5ad"
+            val_h5ad_path = train_dir / "val.h5ad"
 
             logger.info(f"Loading test data from: {test_dir}")
-            # In cross-region mode, use all data from test region (train.h5ad)
             test_h5ad_path = test_dir / "train.h5ad"
             if not test_h5ad_path.exists():
-                # Fall back to test.h5ad if train.h5ad doesn't exist
                 test_h5ad_path = test_dir / "test.h5ad"
-            test_dataset = ScanpyDataset(test_h5ad_path)
         else:
             # Same-region mode: all from data_dir
-            train_dataset = ScanpyDataset(data_dir / "train.h5ad")
-            val_dataset = ScanpyDataset(data_dir / "val.h5ad")
-            test_dataset = ScanpyDataset(data_dir / "test.h5ad")
+            train_h5ad_path = data_dir / "train.h5ad"
+            val_h5ad_path = data_dir / "val.h5ad"
+            test_h5ad_path = data_dir / "test.h5ad"
+
+        # Process metadata if requested
+        if args.use_metadata:
+            if not METADATA_AVAILABLE:
+                logger.error("Metadata processing not available. Install src.data.metadata_processor")
+                return False
+
+            logger.info("\n  Processing metadata features...")
+            metadata_processor = MetadataProcessor()
+
+            # Load h5ad files to access obs for metadata
+            train_adata = ad.read_h5ad(train_h5ad_path)
+            val_adata = ad.read_h5ad(val_h5ad_path)
+            test_adata = ad.read_h5ad(test_h5ad_path)
+
+            # Fit on training data, transform all
+            train_meta = metadata_processor.fit_transform(train_adata.obs)
+            val_meta = metadata_processor.transform(val_adata.obs)
+            test_meta = metadata_processor.transform(test_adata.obs)
+
+            n_metadata = metadata_processor.get_metadata_dim()
+            metadata_features = metadata_processor.get_feature_names()
+
+            logger.info(f"  Extracted {n_metadata} metadata features:")
+            for i, feat in enumerate(metadata_features):
+                logger.info(f"    {i+1}. {feat}")
+
+            # Save metadata processor for reproducibility
+            metadata_processor.save(output_dir / "metadata_processor.pkl")
+
+            # Save metadata feature names
+            import json
+            metadata_info = {
+                "metadata_dim": n_metadata,
+                "feature_names": metadata_features,
+            }
+            with open(output_dir / "metadata_features.json", "w") as f:
+                json.dump(metadata_info, f, indent=2)
+            logger.info(f"  Saved metadata processor to {output_dir / 'metadata_processor.pkl'}")
+
+        # Create datasets (with or without metadata)
+        train_dataset = ScanpyDataset(train_h5ad_path, metadata_array=train_meta)
+        val_dataset = ScanpyDataset(val_h5ad_path, metadata_array=val_meta)
+        test_dataset = ScanpyDataset(test_h5ad_path, metadata_array=test_meta)
+
     except FileNotFoundError as e:
         logger.error(f"Data file not found: {e}")
         logger.error("Make sure you've run prepare_seaad.py with --foundation-model-mode first")
@@ -1153,6 +1321,7 @@ def main():
         head_hidden=args.head_hidden,
         dropout=args.dropout,
         freeze_backbone=args.freeze_backbone,
+        n_metadata=n_metadata,
     )
 
     # =========================================================================
@@ -1173,12 +1342,13 @@ def main():
         training_config = {
             "training": {
                 "learning_rate": args.learning_rate,
+                "backbone_lr": args.backbone_lr if args.backbone_lr else args.learning_rate / 10,
                 "weight_decay": args.weight_decay,
                 "optimizer": "adamw",
                 "epochs": args.epochs,
                 "gradient_clipping": args.gradient_clip,
                 "early_stopping": {"enabled": True, "patience": args.patience},
-                "warmup": {"enabled": False},
+                "warmup": {"enabled": True, "steps": args.warmup_steps},
             },
             "logging": {"log_frequency": 50},
         }
@@ -1207,6 +1377,7 @@ def main():
             use_accelerate=(accelerator_instance is not None),
             accelerator=accelerator_instance,
             class_weights=class_weights,
+            label_smoothing=args.label_smoothing,
         )
 
         # Step 7: Train
@@ -1255,6 +1426,8 @@ def main():
                 "epochs": args.epochs,
                 "patience": args.patience,
                 "use_accelerate": True,
+                "use_metadata": args.use_metadata,
+                "n_metadata": n_metadata,
             },
             "data": {
                 "n_genes": n_genes,
@@ -1286,6 +1459,7 @@ def main():
             weight_decay=args.weight_decay,
             class_weights=class_weights,
             num_classes=args.num_classes,
+            label_smoothing=args.label_smoothing,
         )
 
         # Step 7: Setup callbacks
@@ -1361,6 +1535,8 @@ def main():
                 "epochs": args.epochs,
                 "patience": args.patience,
                 "use_accelerate": False,
+                "use_metadata": args.use_metadata,
+                "n_metadata": n_metadata,
             },
             "data": {
                 "n_genes": n_genes,

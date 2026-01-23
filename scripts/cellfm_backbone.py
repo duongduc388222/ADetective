@@ -27,24 +27,32 @@ logger = logging.getLogger(__name__)
 
 class CellFMEncoder(nn.Module):
     """
-    Simplified CellFM encoder for extracting cell embeddings.
+    CellFM encoder for extracting cell embeddings.
 
-    Architecture based on CellFM 80M model:
-    - Input: (batch, 27934) gene expression
-    - Gene embedding + positional encoding
-    - Transformer encoder layers
+    Architecture based on CellFM 80M model config (from GitHub biomed-AI/CellFM):
+    - Input: (batch, 27934) gene expression values
+    - Gene embedding: Linear(1, enc_dims) per gene
+    - Positional encoding for genes (learnable)
+    - Transformer encoder layers (enc_nlayers with enc_num_heads)
     - CLS token pooling
-    - Output: (batch, hidden_dim) cell embeddings
+    - Output: (batch, enc_dims) cell embeddings
 
-    This is a PyTorch re-implementation compatible with MindSpore weights.
+    CellFM 80M Config (from config.py):
+    - enc_dims = 1536
+    - enc_nlayers = 2
+    - enc_num_heads = 48
+    - dec_dims = 512, dec_nlayers = 6, dec_num_heads = 16 (decoder, not used for classification)
+
+    Note: This is a PyTorch approximation. The original CellFM uses ERetNet (Enhanced RetNet)
+    which has linear complexity. We use standard Transformer encoder as an approximation.
     """
 
     def __init__(
         self,
         n_genes: int = 27934,
-        hidden_dim: int = 512,
-        n_layers: int = 6,
-        n_heads: int = 16,
+        hidden_dim: int = 1536,  # CellFM 80M: enc_dims=1536
+        n_layers: int = 2,       # CellFM 80M: enc_nlayers=2
+        n_heads: int = 48,       # CellFM 80M: enc_num_heads=48
         dropout: float = 0.1,
     ):
         super().__init__()
@@ -245,20 +253,24 @@ def load_cellfm_backbone(
     Example:
         >>> backbone, hidden_dim = load_cellfm_backbone("CellFM_80M_weight.ckpt")
         >>> print(f"Hidden dim: {hidden_dim}")
-        Hidden dim: 512
+        Hidden dim: 1536
     """
     # CellFM 80M model configuration
-    # Based on: https://github.com/biomed-AI/CellFM
-    hidden_dim = 512
+    # Based on: https://github.com/biomed-AI/CellFM/blob/main/config.py
+    # Config_80M class:
+    #   enc_dims=1536, enc_nlayers=2, enc_num_heads=48
+    #   dec_dims=512, dec_nlayers=6, dec_num_heads=16
+    # For classification, we only use the encoder part
+    hidden_dim = 1536  # enc_dims
     n_genes = 27934
-    n_layers = 6
-    n_heads = 16
+    n_layers = 2       # enc_nlayers
+    n_heads = 48       # enc_num_heads
 
     logger.info("Creating CellFM encoder with 80M configuration:")
     logger.info(f"  n_genes: {n_genes:,}")
-    logger.info(f"  hidden_dim: {hidden_dim}")
-    logger.info(f"  n_layers: {n_layers}")
-    logger.info(f"  n_heads: {n_heads}")
+    logger.info(f"  hidden_dim (enc_dims): {hidden_dim}")
+    logger.info(f"  n_layers (enc_nlayers): {n_layers}")
+    logger.info(f"  n_heads (enc_num_heads): {n_heads}")
 
     # Create encoder
     backbone = CellFMEncoder(
