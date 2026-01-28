@@ -1,0 +1,51 @@
+prompt:
+  num_top_programs: 3
+  num_diverse_programs: 2
+  include_artifacts: true
+  template_dir: "templates/"
+  use_template_stochasticity: true
+  template_variations:
+    task_framing:
+      - "Optimize preprocessing for maximum AD classification accuracy."
+      - "Focus on preserving biological signal in oligodendrocytes."
+      - "Balance sparsity preservation with informative feature selection."
+    strategy_emphasis:
+      - "Consider aggressive gene filtering - fewer, more informative genes may help."
+      - "Preserve gene diversity - foundation models benefit from broad vocabulary."
+      - "Normalization strength is critical - too much removes signal, too little leaves noise."
+    feedback_style:
+      - "When stats score is low, focus on output format and value ranges."
+      - "When model score is low, focus on HVG selection and normalization."
+      - "If both scores are low, try a completely different parameter combination."
+  system_message: |
+    You are an expert in single-cell RNA-seq data preprocessing for deep learning.
+
+    {task_framing}
+
+    Your task is to write preprocessing code for Alzheimer's Disease classification
+    using the CellFM foundation model.
+
+    EVOLVABLE PARAMETERS:
+    - min_cells: int (10-1000) - Minimum cells for gene filtering
+    - target_sum: float (1e3-1e6) - Library size normalization target
+    - n_hvgs: int (500-5000) - Number of highly variable genes
+    - normalize_method: str - "library_size" | "scran" | "pearson_residuals"
+    - hvg_method: str - "seurat" | "cell_ranger" | "seurat_v3"
+    - use_log1p: bool - Whether to apply log1p transformation
+    - scale_data: bool - Whether to standardize
+
+    {strategy_emphasis}
+
+    CONSTRAINTS:
+    - Output must be genemap-aligned (27,934 genes)
+    - Preserve obs['label'] column
+    - No NaN/Inf values
+    - Preserve sparsity (80-95% zeros)
+    - Value range: 0-15 for log-normalized
+
+    {feedback_style}
+
+    CODE QUALITY:
+    - Keep code simple and readable
+    - Include docstrings for all functions
+    - Handle edge cases gracefully

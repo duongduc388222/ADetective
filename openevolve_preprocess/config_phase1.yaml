@@ -1,0 +1,95 @@
+# OpenEvolve Configuration - Phase 1: Parameter Evolution
+#
+# This phase evolves preprocessing PARAMETERS while keeping
+# the code structure fixed. Goal: Find optimal hyperparameters
+# for normalization, gene filtering, and HVG selection.
+#
+# Prerequisites:
+#   Run Phase 0 first to get optimized prompts (optional but recommended)
+#
+# Usage:
+#   openevolve candidates/baseline_params.py evaluator.py \
+#     --config config_phase1.yaml \
+#     --iterations 50 \
+#     --output ./output/phase1_results
+
+# Evolution settings
+max_iterations: 50
+random_seed: 42
+
+# LLM Configuration
+llm:
+  api_base: "https://generativelanguage.googleapis.com/v1beta/openai/"
+  models:
+    - name: "gemini-2.5-flash"
+      weight: 1.0
+  temperature: 0.6
+  max_tokens: 4000
+
+# Prompt configuration
+prompt:
+  num_top_programs: 3
+  num_diverse_programs: 2
+  include_artifacts: true
+  template_dir: "templates/"
+  use_template_stochasticity: true
+  template_variations:
+    task_framing:
+      - "Optimize preprocessing for maximum AD classification accuracy."
+      - "Focus on preserving biological signal in oligodendrocytes."
+      - "Balance sparsity preservation with informative feature selection."
+    strategy_emphasis:
+      - "Consider aggressive gene filtering - fewer, more informative genes may help."
+      - "Preserve gene diversity - foundation models benefit from broad vocabulary."
+      - "Normalization strength is critical - too much removes signal, too little leaves noise."
+    feedback_style:
+      - "When stats score is low, focus on output format and value ranges."
+      - "When model score is low, focus on HVG selection and normalization."
+      - "If both scores are low, try a completely different parameter combination."
+  system_message: |
+    You are an expert in single-cell RNA-seq data preprocessing for deep learning.
+
+    {task_framing}
+
+    Your task is to evolve preprocessing PARAMETERS to optimize classification
+    performance on Alzheimer's Disease data using the CellFM foundation model.
+
+    EVOLVABLE PARAMETERS:
+    - min_cells: int (10-1000) - Minimum cells for gene filtering
+    - target_sum: float (1e3-1e6) - Library size normalization target
+    - n_hvgs: int (500-5000) - Number of highly variable genes
+    - normalize_method: str - "library_size" | "scran" | "pearson_residuals"
+    - hvg_method: str - "seurat" | "cell_ranger" | "seurat_v3"
+    - use_log1p: bool - Whether to apply log1p transformation
+    - scale_data: bool - Whether to standardize (usually False for foundation models)
+
+    {strategy_emphasis}
+
+    IMPORTANT CONSTRAINTS:
+    1. Output must be genemap-aligned (27,934 genes)
+    2. Preserve biological signal (don't over-normalize)
+    3. Maintain sparsity (scRNA-seq is 80-95% zeros)
+    4. Keep values in reasonable range (0-15 for log-normalized)
+
+    {feedback_style}
+
+    When suggesting parameter changes:
+    - Make targeted changes based on error feedback
+    - Consider biological implications
+    - Test boundary values occasionally for exploration
+
+# Population database settings
+database:
+  population_size: 50
+  num_islands: 4
+  migration_interval: 10
+  feature_dimensions:
+    - "preprocessing_complexity"
+    - "normalization_strength"
+  feature_bins: 5
+
+# Evaluator settings
+evaluator:
+  cascade_evaluation: true
+  cascade_thresholds:
+    - 0.3   # Stage 1 threshold (stats)

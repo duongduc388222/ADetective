@@ -1,0 +1,116 @@
+# OpenEvolve Configuration - Phase 2: Code Evolution
+#
+# This phase evolves the FULL PREPROCESSING CODE, allowing
+# the LLM to invent new preprocessing strategies.
+#
+# Prerequisites:
+#   Run Phase 1 first to get optimized parameters as a starting point
+#
+# Usage:
+#   openevolve candidates/baseline_code.py evaluator.py \
+#     --config config_phase2.yaml \
+#     --iterations 100 \
+#     --output ./output/phase2_results
+
+# Evolution settings
+max_iterations: 100
+random_seed: 42
+
+# LLM Configuration
+llm:
+  api_base: "https://generativelanguage.googleapis.com/v1beta/openai/"
+  models:
+    - name: "gemini-2.5-flash"
+      weight: 1.0
+  temperature: 0.7  # Higher for code creativity
+  max_tokens: 6000  # More tokens for longer code
+
+# Prompt configuration
+prompt:
+  num_top_programs: 3
+  num_diverse_programs: 3
+  include_artifacts: true
+  template_dir: "templates/"
+  use_template_stochasticity: true
+  template_variations:
+    task_framing:
+      - "Maximize AD classification accuracy through optimal preprocessing."
+      - "Preserve biological signal while reducing noise in oligodendrocyte data."
+      - "Create preprocessing that highlights disease-relevant gene expression patterns."
+    strategy_emphasis:
+      - "Consider novel normalization approaches beyond standard methods."
+      - "Experiment with different gene filtering strategies."
+      - "Try combining multiple preprocessing techniques."
+    code_quality:
+      - "Write clean, simple code with clear variable names."
+      - "Prioritize correctness over cleverness."
+      - "Include error handling for edge cases."
+    feedback_style:
+      - "If execution fails, fix the syntax or import errors first."
+      - "If stats score is low, ensure output format matches requirements."
+      - "If model score is low, try a fundamentally different approach."
+  system_message: |
+    You are an expert in single-cell RNA-seq data preprocessing for CellFM.
+
+    {task_framing}
+
+    Your task is to write a COMPLETE preprocessing pipeline that:
+    1. Takes raw scRNA-seq data (AnnData with ~30,000 genes)
+    2. Outputs processed data (AnnData with exactly 27,934 genes)
+
+    {strategy_emphasis}
+
+    ALLOWED MODIFICATIONS:
+    - Any normalization method (library_size, scran, pearson_residuals, custom)
+    - Any gene filtering strategy (min_cells, variance, expression-based)
+    - Batch correction (combat, harmony, scanorama)
+    - Denoising techniques (MAGIC, DCA, scvi)
+    - Feature engineering (gene modules, pathway scores)
+    - Custom transformations
+
+    REQUIRED FUNCTION SIGNATURE:
+    ```python
+    def preprocess(raw_adata, genemap_path: str):
+        '''
+        Preprocess scRNA-seq data for CellFM classification.
+
+        Args:
+            raw_adata: Raw AnnData with counts
+            genemap_path: Path to genemap.csv (27,934 genes)
+
+        Returns:
+            AnnData with shape (n_cells, 27934)
+        '''
+    ```
+
+    CONSTRAINTS:
+    - Output MUST have exactly 27,934 genes (genemap aligned)
+    - Preserve obs['label'] column
+    - No NaN or Inf values
+    - Use sparse matrices for memory efficiency
+    - Include all necessary imports
+
+    {code_quality}
+
+    AVAILABLE LIBRARIES:
+    - scanpy (sc.pp.*, sc.tl.*)
+    - numpy, pandas, scipy.sparse
+    - sklearn preprocessing
+
+    {feedback_style}
+
+# Population database settings
+database:
+  population_size: 100
+  num_islands: 5
+  migration_interval: 15
+  feature_dimensions:
+    - "preprocessing_complexity"
+    - "normalization_strength"
+  feature_bins: 5
+
+# Evaluator settings
+evaluator:
+  cascade_evaluation: true
+  cascade_thresholds:
+    - 0.3   # Stage 1 threshold (stats)
