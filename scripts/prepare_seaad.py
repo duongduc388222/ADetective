@@ -362,6 +362,70 @@ def subset_splits_to_hvgs(train, val, test, n_hvgs: int = 2000):
 
 
 # =============================================================================
+# Programmatic API for Evaluator
+# =============================================================================
+
+
+def preprocess(raw_adata: "AnnData", genemap_path: str, **kwargs) -> "AnnData":
+    """
+    Programmatic API for preprocessing - called by evaluator.py.
+
+    This function matches the evaluator's expected contract:
+        preprocess(raw_adata: AnnData, genemap_path: str) -> AnnData
+
+    Args:
+        raw_adata: Raw AnnData with counts (already loaded by evaluator)
+            - X: Sparse matrix of raw counts
+            - obs['label']: Integer class labels (0-3 for ADNC)
+        genemap_path: Path to genemap.csv (27,934 genes)
+        **kwargs: Override preprocessing options
+            - min_cells: int (default: from env or 100)
+            - target_sum: float (default: from env or 1e4)
+            - skip_normalization: bool (default: from env or False)
+            - foundation_model_mode: bool (default: from env or True)
+
+    Returns:
+        Preprocessed AnnData with shape (n_cells, 27934) for foundation model mode
+    """
+    # Load defaults from environment
+    min_cells = kwargs.get("min_cells", int(os.environ.get("MIN_CELLS", "100")))
+    target_sum = kwargs.get("target_sum", float(os.environ.get("TARGET_SUM", "1e4")))
+    skip_norm = kwargs.get("skip_normalization",
+                           os.environ.get("SKIP_NORMALIZATION", "false").lower() == "true")
+    fm_mode = kwargs.get("foundation_model_mode",
+                         os.environ.get("FOUNDATION_MODEL_MODE", "true").lower() == "true")
+
+    logger.info(f"preprocess() called: min_cells={min_cells}, target_sum={target_sum}, "
+                f"skip_norm={skip_norm}, foundation_model_mode={fm_mode}")
+
+    # Work on a copy
+    adata = raw_adata.copy()
+
+    # EVOLVE-BLOCK-START
+    # This block is evolved by OpenEvolve for optimal preprocessing
+    # Focus: gene filtering, normalization, feature selection
+    # Goal: Maximize downstream classification performance (QWK score)
+
+    # Step 1: Filter genes by min cells
+    if min_cells > 0:
+        adata = filter_genes(adata, min_cells=min_cells)
+
+    # Step 2: Normalize (unless skipped)
+    if not skip_norm:
+        adata = normalize_data(adata, target_sum=target_sum)
+
+    # Step 3: Expand to genemap vocabulary (foundation model mode)
+    if fm_mode:
+        adata, report = expand_to_genemap_vocab(adata, genemap_path)
+        logger.info(f"Vocab expansion: {report['intersection']} genes matched, "
+                    f"{report['zero_padded_genes']} zero-padded")
+
+    # EVOLVE-BLOCK-END
+
+    return adata
+
+
+# =============================================================================
 # Save & Report
 # =============================================================================
 
